@@ -363,10 +363,59 @@ export default function App() {
   }, [currentUser, authToken]);
 
   // ---------------------------------------------------------------------------
-  // WEBRTC OPTIMIZATION: ULTRA-LOW LATENCY & STUDIO AUDIO FIDELITY
+  // WEBRTC OPTIMIZATION: ULTRA-LOW LATENCY & STUDIO STEREO AUDIO FIDELITY
   // ---------------------------------------------------------------------------
   const optimizePeerConnection = useCallback((pc, isScreenShare = false) => {
     if (!pc) return;
+
+    // Helper: Modifies SDP to force Opus into 48kHz Full-Band Stereo CELT Mode (Music Mode)
+    // Prevents WebRTC from treating system/movie audio as voice (which wipes out BGM & music)
+    const enableStereoOpusInSdp = (sdp) => {
+      if (!sdp) return sdp;
+      return sdp.replace(/a=fmtp:(\d+) (.*)/g, (line, payload, params) => {
+        if (params.includes('minptime') || params.includes('useinbandfec')) {
+          let newParams = params;
+          if (!newParams.includes('stereo=1')) newParams += ';stereo=1';
+          if (!newParams.includes('sprop-stereo=1')) newParams += ';sprop-stereo=1';
+          if (!newParams.includes('maxaveragebitrate=')) newParams += ';maxaveragebitrate=256000';
+          if (!newParams.includes('cbr=1')) newParams += ';cbr=1';
+          return `a=fmtp:${payload} ${newParams}`;
+        }
+        return line;
+      });
+    };
+
+    if (isScreenShare) {
+      try {
+        const origCreateOffer = pc.createOffer.bind(pc);
+        pc.createOffer = async (options) => {
+          const offer = await origCreateOffer(options);
+          if (offer && offer.sdp) {
+            offer.sdp = enableStereoOpusInSdp(offer.sdp);
+          }
+          return offer;
+        };
+
+        const origCreateAnswer = pc.createAnswer.bind(pc);
+        pc.createAnswer = async (options) => {
+          const answer = await origCreateAnswer(options);
+          if (answer && answer.sdp) {
+            answer.sdp = enableStereoOpusInSdp(answer.sdp);
+          }
+          return answer;
+        };
+
+        const origSetLocalDescription = pc.setLocalDescription.bind(pc);
+        pc.setLocalDescription = async (desc) => {
+          if (desc && desc.sdp) {
+            desc.sdp = enableStereoOpusInSdp(desc.sdp);
+          }
+          return origSetLocalDescription(desc);
+        };
+      } catch (err) {
+        console.warn('SDP hook warning:', err);
+      }
+    }
 
     // 1. Ultra-Low Latency: Minimizes WebRTC playout buffer from ~1000ms down to 50ms
     const configureReceivers = () => {
@@ -413,7 +462,7 @@ export default function App() {
             }
           } else if (kind === 'audio') {
             if (isScreenShare) {
-              params.encodings[0].maxBitrate = 192000; // 192 kbps studio audio for system / movie audio
+              params.encodings[0].maxBitrate = 256000; // 256 kbps studio stereo audio for system / movie audio
               params.encodings[0].priority = 'high';
               params.encodings[0].networkPriority = 'high';
             } else {
@@ -508,11 +557,23 @@ export default function App() {
             setIsScreenSharing(true);
             if (screenVideoRef.current) {
               screenVideoRef.current.srcObject = screenMediaStream;
-              screenVideoRef.current.muted = false;
-              screenVideoRef.current.volume = 1;
               screenVideoRef.current.play().catch(e => console.warn('Screen autoplay error:', e));
             }
           });
+
+          // Also catch delayed audio tracks via RTCPeerConnection ontrack event
+          call.peerConnection?.addEventListener('track', (evt) => {
+            if (evt.streams && evt.streams[0]) {
+              console.log('[WebRTC Screen ontrack event]', evt.track.kind, 'Audio count:', evt.streams[0].getAudioTracks().length);
+              setRemoteScreenStream(evt.streams[0]);
+              if (screenVideoRef.current && screenVideoRef.current.srcObject !== evt.streams[0]) {
+                screenVideoRef.current.srcObject = evt.streams[0];
+                screenVideoRef.current.play().catch(e => console.warn('Screen play error:', e));
+              }
+            }
+          });
+
+          peerConnectionsRef.current[`screen-${call.peer}`] = call;
         } else {
           // Answer webcam call with current local stream if available
           const currentStream = localStreamRef.current;
@@ -522,9 +583,8 @@ export default function App() {
             setRemoteStreams(prev => ({ ...prev, [call.peer]: userMediaStream }));
             setupAudioAnalysis(userMediaStream, call.peer);
           });
+          peerConnectionsRef.current[call.peer] = call;
         }
-
-        peerConnectionsRef.current[call.peer] = call;
       });
     });
   }, [optimizePeerConnection]);
@@ -894,10 +954,11 @@ export default function App() {
           echoCancellation: false,
           noiseSuppression: false,
           autoGainControl: false,
-          channelCount: 2,
-          sampleRate: 48000,
           suppressLocalAudioPlayback: false
-        }
+        },
+        systemAudio: 'include',
+        selfBrowserSurface: 'exclude',
+        surfaceSwitching: 'include'
       });
 
       const audioTracks = displayStream.getAudioTracks();
@@ -942,6 +1003,7 @@ export default function App() {
           });
           if (call) {
             optimizePeerConnection(call.peerConnection, true);
+            peerConnectionsRef.current[`screen-${participant.peerId}`] = call;
           }
         }
       });
@@ -1084,6 +1146,16 @@ export default function App() {
       screenVideoRef.current.muted = isSpeakerMuted;
     }
   }, [screenVolume, isSpeakerMuted, roomState.isHost]);
+
+  // Sync remote screen stream to video element for audience
+  useEffect(() => {
+    if (screenVideoRef.current && remoteScreenStream && !roomState.isHost) {
+      if (screenVideoRef.current.srcObject !== remoteScreenStream) {
+        screenVideoRef.current.srcObject = remoteScreenStream;
+        screenVideoRef.current.play().catch(e => console.warn('Screen video sync error:', e));
+      }
+    }
+  }, [remoteScreenStream, roomState.isHost]);
 
   const handleTogglePin = (userToPin) => {
     if (pinnedUser && pinnedUser.userId === userToPin.userId) {
@@ -1500,32 +1572,36 @@ export default function App() {
               ref={screenVideoRef}
               autoPlay
               playsInline
-              muted={roomState.isHost || isSpeakerMuted}
+              muted={true}
               className={`w-full h-full object-contain ${isScreenSharing ? 'block' : 'hidden'}`}
             />
 
             {/* Audio Alert Banner if Host Forgot to Check "Share Audio" */}
             {screenAudioAlert && roomState.isHost && isScreenSharing && (
-              <div className="absolute top-16 left-4 right-4 z-20 bg-amber-500/95 text-slate-950 p-3.5 rounded-xl shadow-2xl flex items-center justify-between border border-amber-300 backdrop-blur-md animate-fade-in">
-                <div className="flex items-center gap-3">
-                  <AlertCircle className="w-5 h-5 flex-shrink-0 text-slate-950" />
+              <div className="absolute top-16 left-4 right-4 z-20 bg-amber-500/95 text-slate-950 p-4 rounded-xl shadow-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 border border-amber-300 backdrop-blur-md animate-fade-in">
+                <div className="flex items-start gap-3">
+                  <AlertCircle className="w-5 h-5 flex-shrink-0 text-slate-950 mt-0.5" />
                   <div className="text-xs">
-                    <p className="font-bold">System / Movie Audio Not Shared!</p>
-                    <p className="text-slate-900 text-[11px] leading-snug">
-                      Your friends cannot hear movie audio. To fix: re-share and check <strong>"Also share system audio"</strong> or choose a <strong>Chrome Tab</strong> with <strong>"Share tab audio"</strong> checked!
+                    <p className="font-bold text-sm text-slate-950">⚠️ No Audio Detected from Screen Share!</p>
+                    <p className="text-slate-900 text-[11px] leading-relaxed mt-0.5">
+                      Windows <strong>cannot capture audio if you select 'Window'</strong>. To share YouTube with full sound & BGM:
+                      <br />
+                      👉 <strong>Option A (Best for YouTube):</strong> Choose <strong>"Chrome Tab"</strong> and check <strong>"Share tab audio"</strong>.
+                      <br />
+                      👉 <strong>Option B (Full Screen Apps):</strong> Choose <strong>"Entire Screen"</strong> and check <strong>"Also share system audio"</strong> (bottom-left).
                     </p>
                   </div>
                 </div>
-                <div className="flex items-center gap-2 flex-shrink-0">
+                <div className="flex items-center gap-2 flex-shrink-0 self-end sm:self-center">
                   <button
                     onClick={handleToggleScreenShare}
-                    className="px-3 py-1.5 rounded-lg bg-slate-950 hover:bg-slate-900 text-white text-xs font-semibold shadow transition cursor-pointer"
+                    className="px-3.5 py-2 rounded-lg bg-slate-950 hover:bg-slate-900 text-white text-xs font-semibold shadow transition cursor-pointer"
                   >
-                    Retry with Audio
+                    Re-share with Audio
                   </button>
                   <button
                     onClick={() => setScreenAudioAlert(false)}
-                    className="p-1 rounded-lg hover:bg-amber-600/30 text-slate-950 transition cursor-pointer"
+                    className="p-1.5 rounded-lg hover:bg-amber-600/30 text-slate-950 transition cursor-pointer text-xs font-bold"
                   >
                     ✕
                   </button>
@@ -2137,6 +2213,24 @@ export default function App() {
             muted={isSpeakerMuted}
           />
         ))}
+
+        {/* Dedicated audio receiver for Screen Share System / Movie Audio (Full 48kHz Stereo) */}
+        {remoteScreenStream && !roomState.isHost && (
+          <audio
+            key="remote-screen-audio"
+            ref={el => {
+              if (el && el.srcObject !== remoteScreenStream) {
+                el.srcObject = remoteScreenStream;
+                el.volume = screenVolume;
+                el.muted = isSpeakerMuted;
+                el.play().catch(e => console.warn('Remote screen audio play error:', e));
+              }
+            }}
+            autoPlay
+            playsInline
+            muted={isSpeakerMuted}
+          />
+        )}
       </div>
     </div>
   );
