@@ -310,55 +310,62 @@ export default function App() {
     setIsLobbyLoading(true);
     setLobbyError('');
 
+    // Safety timeout to prevent infinite spinner
+    const timeoutTimer = setTimeout(() => {
+      setIsLobbyLoading(false);
+      setLobbyError('Connection took too long. Please try again.');
+    }, 12000);
+
     try {
-      // 1. Initialize user webcam/mic stream first
-      const stream = await initializeUserMedia();
+      // 1. Initialize user webcam/mic stream in parallel
+      const streamPromise = initializeUserMedia();
 
       // 2. Connect to Socket.io with JWT Auth
       const socket = io(SERVER_URL, {
         auth: { token: authToken },
-        transports: ['websocket', 'polling']
+        transports: ['websocket', 'polling'],
+        timeout: 10000,
+        reconnectionAttempts: 5
       });
       socketRef.current = socket;
 
-      // 3. Connect to integrated PeerJS Server
+      socket.on('connect_error', (err) => {
+        clearTimeout(timeoutTimer);
+        console.error('[Socket Error]:', err);
+        setLobbyError('Server connection error: ' + (err.message || 'Could not connect to party server'));
+        setIsLobbyLoading(false);
+      });
+
+      // 3. Connect to PeerJS (Local on localhost, Public PeerJS Cloud in production)
       const isLocal = window.location.hostname === 'localhost';
-      const peer = new Peer(undefined, {
-        host: isLocal ? 'localhost' : window.location.hostname,
-        port: isLocal ? 5000 : (window.location.port ? parseInt(window.location.port) : (window.location.protocol === 'https:' ? 443 : 80)),
-        path: '/peerjs',
-        secure: window.location.protocol === 'https:'
+      const peer = new Peer(undefined, isLocal ? {
+        host: 'localhost',
+        port: 5000,
+        path: '/peerjs'
+      } : {
+        // Free reliable global PeerJS signaling mesh on HTTPS
       });
       peerRef.current = peer;
 
       peer.on('open', (peerId) => {
         console.log('[PeerJS Ready] Peer ID:', peerId);
-
-        if (isCreating) {
-          socket.emit('create-room', { roomName: roomName || `${currentUser.username}'s Party` }, (res) => {
-            if (res.success) {
-              joinRoomWithPeer(socket, peer, stream, res.roomId);
-            } else {
-              setLobbyError(res.error || 'Failed to create room');
-              setIsLobbyLoading(false);
-            }
-          });
-        } else {
-          joinRoomWithPeer(socket, peer, stream, roomId);
+        if (socketRef.current) {
+          socketRef.current.emit('update-peer-id', { peerId });
         }
       });
 
-      // Handle incoming WebRTC video/audio calls from other room peers
-      peer.on('call', (call) => {
-        console.log('[WebRTC] Receiving incoming call from:', call.peer);
+      peer.on('error', (err) => {
+        console.warn('[PeerJS Notice]:', err);
+      });
 
-        // Check if this incoming call is the Host's Screen Share stream
+      // Handle incoming WebRTC calls
+      peer.on('call', (call) => {
+        console.log('[WebRTC] Incoming call from:', call.peer);
         const isScreenShareCall = call.metadata && call.metadata.type === 'screen-share';
 
         if (isScreenShareCall) {
-          call.answer(); // Answer screen share stream without sending local webcam back
+          call.answer();
           call.on('stream', (screenMediaStream) => {
-            console.log('[WebRTC] Received host screen share stream');
             setRemoteScreenStream(screenMediaStream);
             setIsScreenSharing(true);
             if (screenVideoRef.current) {
@@ -366,21 +373,35 @@ export default function App() {
             }
           });
         } else {
-          // Standard participant webcam/audio mesh call
-          call.answer(stream);
-          call.on('stream', (userMediaStream) => {
-            console.log('[WebRTC] Received participant media stream from:', call.peer);
-            setRemoteStreams(prev => ({ ...prev, [call.peer]: userMediaStream }));
-            setupAudioAnalysis(userMediaStream, call.peer);
+          streamPromise.then((userStream) => {
+            call.answer(userStream);
+            call.on('stream', (userMediaStream) => {
+              setRemoteStreams(prev => ({ ...prev, [call.peer]: userMediaStream }));
+              setupAudioAnalysis(userMediaStream, call.peer);
+            });
           });
         }
 
         peerConnectionsRef.current[call.peer] = call;
       });
 
-      peer.on('error', (err) => {
-        console.error('[PeerJS Error]:', err);
-      });
+      // 4. Trigger Room Creation or Join immediately without waiting for PeerJS!
+      const stream = await streamPromise;
+
+      if (isCreating) {
+        socket.emit('create-room', { roomName: roomName || `${currentUser.username}'s Party` }, (res) => {
+          clearTimeout(timeoutTimer);
+          if (res.success) {
+            joinRoomWithPeer(socket, peer, stream, res.roomId);
+          } else {
+            setLobbyError(res.error || 'Failed to create room');
+            setIsLobbyLoading(false);
+          }
+        });
+      } else {
+        clearTimeout(timeoutTimer);
+        joinRoomWithPeer(socket, peer, stream, roomId);
+      }
 
       // -------------------------------------------------------------
       // SOCKET EVENT LISTENERS
@@ -477,7 +498,7 @@ export default function App() {
    * Complete the join-room handshake once PeerJS is ready
    */
   const joinRoomWithPeer = (socket, peer, stream, roomId) => {
-    socket.emit('join-room', { roomId, peerId: peer.id }, (response) => {
+    socket.emit('join-room', { roomId, peerId: peer?.id || null }, (response) => {
       setIsLobbyLoading(false);
 
       if (!response.success) {
