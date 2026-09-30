@@ -60,7 +60,8 @@ export default function App() {
   // ---------------------------------------------------------------------------
   const [currentUser, setCurrentUser] = useState(null);
   const [authToken, setAuthToken] = useState(() => localStorage.getItem('fw_token') || '');
-  const [authMode, setAuthMode] = useState('login'); // 'login' | 'register'
+  const [authMode, setAuthMode] = useState('guest'); // 'guest' | 'login' | 'register'
+  const [guestName, setGuestName] = useState('');
   const [authFormData, setAuthFormData] = useState({ username: '', email: '', password: '' });
   const [authError, setAuthError] = useState('');
   const [isAuthLoading, setIsAuthLoading] = useState(false);
@@ -137,6 +138,38 @@ export default function App() {
         handleLogout();
       });
   }, [authToken]);
+
+  const handleGuestSubmit = async (e) => {
+    e.preventDefault();
+    if (!guestName.trim()) {
+      setAuthError('Please enter a display name');
+      return;
+    }
+    setAuthError('');
+    setIsAuthLoading(true);
+
+    try {
+      const res = await fetch(`${SERVER_URL}/api/auth/guest`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: guestName.trim() })
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to enter party');
+      }
+
+      localStorage.setItem('fw_token', data.token);
+      setAuthToken(data.token);
+      setCurrentUser(data.user);
+      setGuestName('');
+    } catch (err) {
+      setAuthError(err.message);
+    } finally {
+      setIsAuthLoading(false);
+    }
+  };
 
   const handleAuthSubmit = async (e) => {
     e.preventDefault();
@@ -289,9 +322,10 @@ export default function App() {
       socketRef.current = socket;
 
       // 3. Connect to integrated PeerJS Server
+      const isLocal = window.location.hostname === 'localhost';
       const peer = new Peer(undefined, {
-        host: window.location.hostname === 'localhost' ? 'localhost' : window.location.hostname,
-        port: window.location.hostname === 'localhost' ? 5000 : (window.location.port || 443),
+        host: isLocal ? 'localhost' : window.location.hostname,
+        port: isLocal ? 5000 : (window.location.port ? parseInt(window.location.port) : (window.location.protocol === 'https:' ? 443 : 80)),
         path: '/peerjs',
         secure: window.location.protocol === 'https:'
       });
@@ -671,7 +705,7 @@ export default function App() {
   };
 
   // ---------------------------------------------------------------------------
-  // VIEW RENDER: 1. AUTHENTICATION (LOGIN / REGISTER)
+  // VIEW RENDER: 1. AUTHENTICATION & INSTANT GUEST ENTRY
   // ---------------------------------------------------------------------------
   if (!currentUser) {
     return (
@@ -681,7 +715,7 @@ export default function App() {
         <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-purple-500/10 rounded-full blur-3xl pointer-events-none" />
 
         <div className="w-full max-w-md glass-panel p-8 rounded-2xl shadow-2xl relative z-10 border border-slate-800">
-          <div className="text-center mb-8">
+          <div className="text-center mb-6">
             <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-gradient-to-tr from-brand-600 to-purple-600 mb-3 shadow-lg shadow-brand-500/20">
               <Film className="w-8 h-8 text-white" />
             </div>
@@ -691,6 +725,32 @@ export default function App() {
             <p className="text-slate-400 text-sm mt-1">Real-time Watch Party & Screen Sharing</p>
           </div>
 
+          {/* Mode Switcher Tabs */}
+          <div className="flex rounded-xl bg-slate-900/90 p-1 mb-6 border border-slate-800">
+            <button
+              type="button"
+              onClick={() => { setAuthMode('guest'); setAuthError(''); }}
+              className={`flex-1 py-2 text-xs font-semibold rounded-lg transition ${
+                authMode === 'guest'
+                  ? 'bg-brand-600 text-white shadow'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              Instant Guest (No Password)
+            </button>
+            <button
+              type="button"
+              onClick={() => { setAuthMode('login'); setAuthError(''); }}
+              className={`flex-1 py-2 text-xs font-semibold rounded-lg transition ${
+                authMode !== 'guest'
+                  ? 'bg-slate-800 text-white shadow'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              Account Login
+            </button>
+          </div>
+
           {authError && (
             <div className="mb-4 p-3 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-400 text-sm flex items-center gap-2">
               <AlertCircle className="w-4 h-4 flex-shrink-0" />
@@ -698,81 +758,116 @@ export default function App() {
             </div>
           )}
 
-          <form onSubmit={handleAuthSubmit} className="space-y-4">
-            {authMode === 'register' && (
+          {/* 1. INSTANT GUEST ENTRY FORM */}
+          {authMode === 'guest' ? (
+            <form onSubmit={handleGuestSubmit} className="space-y-4">
               <div>
                 <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
-                  Username
+                  Your Display Name / Nickname
                 </label>
                 <input
                   type="text"
                   required
-                  placeholder="e.g. CinemaMaster"
-                  value={authFormData.username}
-                  onChange={(e) => setAuthFormData({ ...authFormData, username: e.target.value })}
+                  placeholder="e.g. Charan or Alex"
+                  value={guestName}
+                  onChange={(e) => setGuestName(e.target.value)}
+                  className="w-full px-4 py-3 rounded-lg bg-slate-900 border border-slate-700/80 text-white placeholder-slate-500 focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 text-sm transition"
+                />
+                <p className="text-[11px] text-slate-500 mt-1.5">
+                  No password or email required. Hop straight into the watch party!
+                </p>
+              </div>
+
+              <button
+                type="submit"
+                disabled={isAuthLoading}
+                className="w-full py-3 px-4 rounded-lg bg-gradient-to-r from-brand-600 to-purple-600 hover:from-brand-500 hover:to-purple-500 text-white font-medium text-sm transition shadow-lg shadow-brand-500/25 disabled:opacity-50 cursor-pointer flex items-center justify-center gap-2 mt-4"
+              >
+                {isAuthLoading ? (
+                  <div className="w-5 h-5 border-2 border-white/20 border-t-white rounded-full animate-spin" />
+                ) : (
+                  'Jump into Watch Party 🚀'
+                )}
+              </button>
+            </form>
+          ) : (
+            /* 2. REGULAR ACCOUNT FORM (LOGIN / REGISTER) */
+            <form onSubmit={handleAuthSubmit} className="space-y-4">
+              {authMode === 'register' && (
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
+                    Username
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="e.g. CinemaMaster"
+                    value={authFormData.username}
+                    onChange={(e) => setAuthFormData({ ...authFormData, username: e.target.value })}
+                    className="w-full px-4 py-2.5 rounded-lg bg-slate-900 border border-slate-700/80 text-white placeholder-slate-500 focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 text-sm transition"
+                  />
+                </div>
+              )}
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
+                  {authMode === 'login' ? 'Email or Username' : 'Email Address'}
+                </label>
+                <input
+                  type={authMode === 'login' ? 'text' : 'email'}
+                  required
+                  placeholder={authMode === 'login' ? 'Enter username or email' : 'you@domain.com'}
+                  value={authFormData.email}
+                  onChange={(e) => setAuthFormData({ ...authFormData, email: e.target.value })}
                   className="w-full px-4 py-2.5 rounded-lg bg-slate-900 border border-slate-700/80 text-white placeholder-slate-500 focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 text-sm transition"
                 />
               </div>
-            )}
 
-            <div>
-              <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
-                {authMode === 'login' ? 'Email or Username' : 'Email Address'}
-              </label>
-              <input
-                type={authMode === 'login' ? 'text' : 'email'}
-                required
-                placeholder={authMode === 'login' ? 'Enter username or email' : 'you@domain.com'}
-                value={authFormData.email}
-                onChange={(e) => setAuthFormData({ ...authFormData, email: e.target.value })}
-                className="w-full px-4 py-2.5 rounded-lg bg-slate-900 border border-slate-700/80 text-white placeholder-slate-500 focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 text-sm transition"
-              />
-            </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
+                  Password
+                </label>
+                <input
+                  type="password"
+                  required
+                  minLength={6}
+                  placeholder="••••••••"
+                  value={authFormData.password}
+                  onChange={(e) => setAuthFormData({ ...authFormData, password: e.target.value })}
+                  className="w-full px-4 py-2.5 rounded-lg bg-slate-900 border border-slate-700/80 text-white placeholder-slate-500 focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 text-sm transition"
+                />
+              </div>
 
-            <div>
-              <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
-                Password
-              </label>
-              <input
-                type="password"
-                required
-                minLength={6}
-                placeholder="••••••••"
-                value={authFormData.password}
-                onChange={(e) => setAuthFormData({ ...authFormData, password: e.target.value })}
-                className="w-full px-4 py-2.5 rounded-lg bg-slate-900 border border-slate-700/80 text-white placeholder-slate-500 focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 text-sm transition"
-              />
-            </div>
+              <button
+                type="submit"
+                disabled={isAuthLoading}
+                className="w-full py-3 px-4 rounded-lg bg-gradient-to-r from-brand-600 to-brand-500 hover:from-brand-500 hover:to-brand-600 text-white font-medium text-sm transition shadow-lg shadow-brand-500/25 disabled:opacity-50 cursor-pointer flex items-center justify-center gap-2 mt-2"
+              >
+                {isAuthLoading ? (
+                  <div className="w-5 h-5 border-2 border-white/20 border-t-white rounded-full animate-spin" />
+                ) : authMode === 'login' ? (
+                  'Sign In with Account'
+                ) : (
+                  'Create Your Account'
+                )}
+              </button>
 
-            <button
-              type="submit"
-              disabled={isAuthLoading}
-              className="w-full py-3 px-4 rounded-lg bg-gradient-to-r from-brand-600 to-brand-500 hover:from-brand-500 hover:to-brand-600 text-white font-medium text-sm transition shadow-lg shadow-brand-500/25 disabled:opacity-50 cursor-pointer flex items-center justify-center gap-2 mt-2"
-            >
-              {isAuthLoading ? (
-                <div className="w-5 h-5 border-2 border-white/20 border-t-white rounded-full animate-spin" />
-              ) : authMode === 'login' ? (
-                'Sign In to Watch Party'
-              ) : (
-                'Create Your Account'
-              )}
-            </button>
-          </form>
-
-          <div className="mt-6 pt-4 border-t border-slate-800 text-center">
-            <button
-              type="button"
-              onClick={() => {
-                setAuthMode(authMode === 'login' ? 'register' : 'login');
-                setAuthError('');
-              }}
-              className="text-xs text-brand-400 hover:text-brand-300 transition"
-            >
-              {authMode === 'login'
-                ? "Don't have an account? Sign up here"
-                : 'Already registered? Sign in instead'}
-            </button>
-          </div>
+              <div className="pt-2 text-center">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAuthMode(authMode === 'login' ? 'register' : 'login');
+                    setAuthError('');
+                  }}
+                  className="text-xs text-brand-400 hover:text-brand-300 transition"
+                >
+                  {authMode === 'login'
+                    ? "Don't have an account? Sign up here"
+                    : 'Already registered? Sign in instead'}
+                </button>
+              </div>
+            </form>
+          )}
         </div>
       </div>
     );
