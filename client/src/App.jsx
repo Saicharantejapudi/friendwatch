@@ -93,6 +93,8 @@ export default function App() {
   const [isMicMuted, setIsMicMuted] = useState(false);
   const [isCameraOff, setIsCameraOff] = useState(false);
   const [isSpeakerMuted, setIsSpeakerMuted] = useState(false);
+  const [screenVolume, setScreenVolume] = useState(1);
+  const [screenAudioAlert, setScreenAudioAlert] = useState(false);
   const [activeSpeakers, setActiveSpeakers] = useState(new Set());
   const [remoteStreams, setRemoteStreams] = useState({}); // { [peerId]: MediaStream }
 
@@ -361,6 +363,84 @@ export default function App() {
   }, [currentUser, authToken]);
 
   // ---------------------------------------------------------------------------
+  // WEBRTC OPTIMIZATION: ULTRA-LOW LATENCY & STUDIO AUDIO FIDELITY
+  // ---------------------------------------------------------------------------
+  const optimizePeerConnection = useCallback((pc, isScreenShare = false) => {
+    if (!pc) return;
+
+    // 1. Ultra-Low Latency: Minimizes WebRTC playout buffer from ~1000ms down to 50ms
+    const configureReceivers = () => {
+      try {
+        pc.getReceivers().forEach(receiver => {
+          if ('playoutDelayHint' in receiver) {
+            receiver.playoutDelayHint = 0.05; // 50ms playout target
+          }
+          if ('jitterBufferTarget' in receiver) {
+            receiver.jitterBufferTarget = 50; // 50ms jitter target
+          }
+        });
+      } catch (e) {
+        console.warn('Receiver low-latency tuning warning:', e);
+      }
+    };
+
+    configureReceivers();
+    pc.addEventListener('track', () => {
+      setTimeout(configureReceivers, 100);
+    });
+
+    // 2. High Bitrate & Encoding Tuning: Prevents bufferbloat and ensures pristine stereo movie audio
+    const configureSenders = () => {
+      try {
+        pc.getSenders().forEach(sender => {
+          if (!sender.track) return;
+          const kind = sender.track.kind;
+          const params = sender.getParameters();
+          if (!params.encodings || params.encodings.length === 0) {
+            params.encodings = [{}];
+          }
+
+          if (kind === 'video') {
+            if (isScreenShare) {
+              params.encodings[0].maxBitrate = 3500000; // 3.5 Mbps cap for crisp 1080p without network saturation
+              params.encodings[0].priority = 'high';
+              params.encodings[0].networkPriority = 'high';
+              params.degradationPreference = 'maintain-framerate';
+            } else {
+              params.encodings[0].maxBitrate = 500000; // 500 kbps for webcam mesh
+              params.encodings[0].priority = 'low';
+              params.degradationPreference = 'balanced';
+            }
+          } else if (kind === 'audio') {
+            if (isScreenShare) {
+              params.encodings[0].maxBitrate = 192000; // 192 kbps studio audio for system / movie audio
+              params.encodings[0].priority = 'high';
+              params.encodings[0].networkPriority = 'high';
+            } else {
+              params.encodings[0].maxBitrate = 64000; // 64 kbps voice audio
+              params.encodings[0].priority = 'high';
+            }
+          }
+
+          sender.setParameters(params).catch(e => console.warn('setParameters tuning notice:', e));
+        });
+      } catch (e) {
+        console.warn('Sender tuning warning:', e);
+      }
+    };
+
+    if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+      configureSenders();
+    } else {
+      pc.addEventListener('iceconnectionstatechange', () => {
+        if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+          configureSenders();
+        }
+      });
+    }
+  }, []);
+
+  // ---------------------------------------------------------------------------
   // 4. WEBRTC PEER INITIALIZATION WITH GLOBAL STUN SERVERS
   // ---------------------------------------------------------------------------
   const initPeer = useCallback(() => {
@@ -418,15 +498,18 @@ export default function App() {
       peer.on('call', (call) => {
         console.log('[WebRTC Incoming Call] from:', call.peer, 'Metadata:', call.metadata);
         const isScreenShareCall = call.metadata && call.metadata.type === 'screen-share';
+        optimizePeerConnection(call.peerConnection, isScreenShareCall);
 
         if (isScreenShareCall) {
           call.answer();
           call.on('stream', (screenMediaStream) => {
-            console.log('[WebRTC Screen] Remote screen stream received');
+            console.log('[WebRTC Screen] Remote screen stream received. Audio tracks:', screenMediaStream.getAudioTracks().length);
             setRemoteScreenStream(screenMediaStream);
             setIsScreenSharing(true);
             if (screenVideoRef.current) {
               screenVideoRef.current.srcObject = screenMediaStream;
+              screenVideoRef.current.muted = false;
+              screenVideoRef.current.volume = 1;
               screenVideoRef.current.play().catch(e => console.warn('Screen autoplay error:', e));
             }
           });
@@ -444,7 +527,7 @@ export default function App() {
         peerConnectionsRef.current[call.peer] = call;
       });
     });
-  }, []);
+  }, [optimizePeerConnection]);
 
   // ---------------------------------------------------------------------------
   // 5. ENTER ROOM (CREATE AS HOST OR JOIN WITH CODE)
@@ -498,9 +581,12 @@ export default function App() {
         // If host is already screen sharing, call the new user with the screen stream!
         if (participant.peerId && screenStreamRef.current && roomStateRef.current.isHost && peerRef.current) {
           console.log('[WebRTC Screen] Calling joining user with screen share:', participant.peerId);
-          peerRef.current.call(participant.peerId, screenStreamRef.current, {
+          const call = peerRef.current.call(participant.peerId, screenStreamRef.current, {
             metadata: { type: 'screen-share', isHost: true }
           });
+          if (call) {
+            optimizePeerConnection(call.peerConnection, true);
+          }
         }
       });
 
@@ -523,9 +609,12 @@ export default function App() {
         // If host is already screen sharing, send screen stream to newly ready peer
         if (peerId && screenStreamRef.current && roomStateRef.current.isHost && peerRef.current) {
           console.log('[WebRTC Screen] Calling newly ready peer with screen share:', peerId);
-          peerRef.current.call(peerId, screenStreamRef.current, {
+          const call = peerRef.current.call(peerId, screenStreamRef.current, {
             metadata: { type: 'screen-share', isHost: true }
           });
+          if (call) {
+            optimizePeerConnection(call.peerConnection, true);
+          }
         }
       });
 
@@ -696,6 +785,7 @@ export default function App() {
       });
 
       if (!call) return;
+      optimizePeerConnection(call.peerConnection, false);
 
       call.on('stream', (userMediaStream) => {
         console.log('[WebRTC Mesh] Call stream established with:', remotePeerId);
@@ -756,6 +846,7 @@ export default function App() {
     setRemoteStreams({});
     setRemoteScreenStream(null);
     setIsScreenSharing(false);
+    setScreenAudioAlert(false);
     setMessages([]);
     setIsLobbyLoading(false);
     setPinnedUser(null);
@@ -781,6 +872,7 @@ export default function App() {
       screenStream.getTracks().forEach(track => track.stop());
       setScreenStream(null);
       setIsScreenSharing(false);
+      setScreenAudioAlert(false);
       if (screenVideoRef.current) {
         screenVideoRef.current.srcObject = null;
       }
@@ -789,24 +881,52 @@ export default function App() {
     }
 
     try {
+      // High-performance screen capture: 1080p@30fps caps & crystal clear stereo audio
       const displayStream = await navigator.mediaDevices.getDisplayMedia({
         video: {
           cursor: 'always',
           displaySurface: 'browser',
-          frameRate: { ideal: 30, max: 60 }
+          width: { ideal: 1920, max: 1920 },
+          height: { ideal: 1080, max: 1080 },
+          frameRate: { ideal: 30, max: 30 }
         },
         audio: {
           echoCancellation: false,
           noiseSuppression: false,
-          autoGainControl: false
+          autoGainControl: false,
+          channelCount: 2,
+          sampleRate: 48000,
+          suppressLocalAudioPlayback: false
         }
       });
+
+      const audioTracks = displayStream.getAudioTracks();
+      const videoTracks = displayStream.getVideoTracks();
+
+      if (audioTracks.length === 0) {
+        console.warn('[Screen Share] No system/tab audio track detected from display picker');
+        setScreenAudioAlert(true);
+      } else {
+        console.log('[Screen Share] Audio track active:', audioTracks[0].label);
+        setScreenAudioAlert(false);
+        audioTracks.forEach(track => {
+          track.enabled = true;
+          if ('contentHint' in track) {
+            track.contentHint = 'music'; // Keeps high frequencies & stereo fidelity for movies/music
+          }
+        });
+      }
+
+      if (videoTracks.length > 0 && 'contentHint' in videoTracks[0]) {
+        videoTracks[0].contentHint = 'motion'; // Prioritize smooth 30fps motion
+      }
 
       setScreenStream(displayStream);
       setIsScreenSharing(true);
 
       if (screenVideoRef.current) {
         screenVideoRef.current.srcObject = displayStream;
+        screenVideoRef.current.muted = true; // Host must NOT hear own capture to prevent delayed feedback loop
         screenVideoRef.current.play().catch(e => console.warn('Screen play error:', e));
       }
 
@@ -814,12 +934,15 @@ export default function App() {
         handleToggleScreenShare();
       };
 
-      // Broadcast screen share stream to all participants in room
+      // Broadcast screen share stream to all participants in room with optimized RTCPeerConnection
       roomState.participants.forEach(participant => {
         if (participant.peerId && participant.userId !== currentUser.id && peerRef.current) {
-          peerRef.current.call(participant.peerId, displayStream, {
+          const call = peerRef.current.call(participant.peerId, displayStream, {
             metadata: { type: 'screen-share', isHost: true }
           });
+          if (call) {
+            optimizePeerConnection(call.peerConnection, true);
+          }
         }
       });
 
@@ -949,10 +1072,18 @@ export default function App() {
     const newMutedState = !isSpeakerMuted;
     setIsSpeakerMuted(newMutedState);
 
-    if (screenVideoRef.current) {
+    if (screenVideoRef.current && !roomState.isHost) {
       screenVideoRef.current.muted = newMutedState;
     }
   };
+
+  // Sync screen video volume and mute status for audience
+  useEffect(() => {
+    if (screenVideoRef.current && !roomState.isHost) {
+      screenVideoRef.current.volume = screenVolume;
+      screenVideoRef.current.muted = isSpeakerMuted;
+    }
+  }, [screenVolume, isSpeakerMuted, roomState.isHost]);
 
   const handleTogglePin = (userToPin) => {
     if (pinnedUser && pinnedUser.userId === userToPin.userId) {
@@ -1369,8 +1500,38 @@ export default function App() {
               ref={screenVideoRef}
               autoPlay
               playsInline
+              muted={roomState.isHost || isSpeakerMuted}
               className={`w-full h-full object-contain ${isScreenSharing ? 'block' : 'hidden'}`}
             />
+
+            {/* Audio Alert Banner if Host Forgot to Check "Share Audio" */}
+            {screenAudioAlert && roomState.isHost && isScreenSharing && (
+              <div className="absolute top-16 left-4 right-4 z-20 bg-amber-500/95 text-slate-950 p-3.5 rounded-xl shadow-2xl flex items-center justify-between border border-amber-300 backdrop-blur-md animate-fade-in">
+                <div className="flex items-center gap-3">
+                  <AlertCircle className="w-5 h-5 flex-shrink-0 text-slate-950" />
+                  <div className="text-xs">
+                    <p className="font-bold">System / Movie Audio Not Shared!</p>
+                    <p className="text-slate-900 text-[11px] leading-snug">
+                      Your friends cannot hear movie audio. To fix: re-share and check <strong>"Also share system audio"</strong> or choose a <strong>Chrome Tab</strong> with <strong>"Share tab audio"</strong> checked!
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  <button
+                    onClick={handleToggleScreenShare}
+                    className="px-3 py-1.5 rounded-lg bg-slate-950 hover:bg-slate-900 text-white text-xs font-semibold shadow transition cursor-pointer"
+                  >
+                    Retry with Audio
+                  </button>
+                  <button
+                    onClick={() => setScreenAudioAlert(false)}
+                    className="p-1 rounded-lg hover:bg-amber-600/30 text-slate-950 transition cursor-pointer"
+                  >
+                    ✕
+                  </button>
+                </div>
+              </div>
+            )}
 
             {/* Waiting / Cinema Placeholder when no screen is active */}
             {!isScreenSharing && (
@@ -1460,6 +1621,27 @@ export default function App() {
 
             {/* Media Audio/Video Toggles */}
             <div className="flex items-center gap-2">
+              {/* Audience Independent Movie Volume Slider */}
+              {!roomState.isHost && isScreenSharing && (
+                <div className="flex items-center gap-1.5 bg-slate-800/80 px-2.5 py-1.5 rounded-lg border border-slate-700/60 mr-1 shadow-sm">
+                  <Volume2 className="w-3.5 h-3.5 text-brand-400 flex-shrink-0" />
+                  <span className="text-[10px] text-slate-300 font-medium hidden sm:inline">Movie:</span>
+                  <input
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.05"
+                    value={screenVolume}
+                    onChange={(e) => setScreenVolume(parseFloat(e.target.value))}
+                    className="w-14 sm:w-20 h-1 accent-brand-500 bg-slate-700 rounded cursor-pointer"
+                    title={`Movie Volume: ${Math.round(screenVolume * 100)}%`}
+                  />
+                  <span className="text-[9px] text-slate-400 font-mono w-6 text-right">
+                    {Math.round(screenVolume * 100)}%
+                  </span>
+                </div>
+              )}
+
               {/* Mic Toggle */}
               <button
                 onClick={toggleMicrophone}
@@ -1939,6 +2121,23 @@ export default function App() {
           </aside>
         )}
       </div>
+      {/* Dedicated audio receivers for all remote webcam/mic streams so speech is never cut off */}
+      <div className="hidden" aria-hidden="true">
+        {Object.entries(remoteStreams).map(([peerId, stream]) => (
+          <audio
+            key={`remote-audio-${peerId}`}
+            ref={el => {
+              if (el && el.srcObject !== stream) {
+                el.srcObject = stream;
+                el.play().catch(e => console.warn('Remote mic audio play error:', e));
+              }
+            }}
+            autoPlay
+            playsInline
+            muted={isSpeakerMuted}
+          />
+        ))}
+      </div>
     </div>
   );
 }
@@ -1966,7 +2165,7 @@ function ParticipantVideo({ stream, isSpeakerMuted, className = "w-full h-full o
       ref={videoRef}
       autoPlay
       playsInline
-      muted={isSpeakerMuted}
+      muted={true}
       className={className}
     />
   );
