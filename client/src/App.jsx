@@ -1064,10 +1064,25 @@ export default function App() {
 
     const audioTrack = stream.getAudioTracks()[0];
     if (audioTrack) {
-      audioTrack.enabled = !audioTrack.enabled;
-      const muted = !audioTrack.enabled;
-      setIsMicMuted(muted);
-      socketRef.current?.emit('media-status-change', { isMuted: muted });
+      if (!isMicMuted) {
+        // True hardware release: stop the track so Windows & Bluetooth immediately exit VoIP / Hands-Free mode
+        audioTrack.stop();
+        stream.removeTrack(audioTrack);
+        setIsMicMuted(true);
+        socketRef.current?.emit('media-status-change', { isMuted: true });
+        Object.values(peerConnectionsRef.current).forEach(call => {
+          try {
+            const senders = call.peerConnection?.getSenders() || [];
+            const audioSender = senders.find(s => s.track?.kind === 'audio');
+            if (audioSender) {
+              audioSender.replaceTrack(null);
+            }
+          } catch (e) {
+            console.warn('Error clearing audio track in peer connection:', e);
+          }
+        });
+        return;
+      }
     }
   };
 
