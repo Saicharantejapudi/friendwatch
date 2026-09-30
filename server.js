@@ -267,6 +267,44 @@ function authenticateToken(req, res, next) {
 // -------------------------------------------------------------
 
 /**
+ * POST /api/auth/guest
+ * Instant access without password or account creation
+ */
+app.post('/api/auth/guest', async (req, res) => {
+  try {
+    const { username } = req.body;
+    if (!username || !username.trim()) {
+      return res.status(400).json({ error: 'Display name is required' });
+    }
+
+    const guestId = 'guest_' + Math.random().toString(36).substring(2, 9) + Date.now().toString(36);
+    const cleanUsername = username.trim();
+    const guestUser = {
+      id: guestId,
+      username: cleanUsername,
+      email: `${cleanUsername.toLowerCase().replace(/\s+/g, '_')}@guest.party`,
+      isGuest: true,
+      createdAt: new Date().toISOString()
+    };
+
+    const token = jwt.sign(
+      { id: guestUser.id, username: guestUser.username, email: guestUser.email, isGuest: true },
+      JWT_SECRET,
+      { expiresIn: '24h' }
+    );
+
+    return res.status(200).json({
+      message: 'Guest session created',
+      user: guestUser,
+      token
+    });
+  } catch (err) {
+    console.error('Guest login error:', err);
+    return res.status(500).json({ error: 'Failed to create guest session' });
+  }
+});
+
+/**
  * POST /api/auth/register
  */
 app.post('/api/auth/register', async (req, res) => {
@@ -361,6 +399,18 @@ app.post('/api/auth/login', async (req, res) => {
  */
 app.get('/api/auth/me', authenticateToken, async (req, res) => {
   try {
+    if (req.user.isGuest) {
+      return res.json({
+        user: {
+          id: req.user.id,
+          username: req.user.username,
+          email: req.user.email,
+          isGuest: true,
+          createdAt: new Date().toISOString()
+        }
+      });
+    }
+
     const user = await dbFindUserById(req.user.id);
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
