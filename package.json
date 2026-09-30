@@ -1,0 +1,40 @@
+{
+  "name": "friendwatch",
+  "version": "1.0.0",
+  "description": "Real-time web-based Watch Party application with Screen Sharing, PeerJS WebRTC, Socket.io, and React",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "server": "node server.js",
+    "server:dev": "nodemon server.js",
+    "client": "npm --prefix client run dev",
+    "dev": "concurrently \"npm run server\" \"npm run client\"",
+    "build": "npm --prefix client run build",
+    "install:all": "npm install && npm --prefix client install"
+  },
+  "keywords": [
+    "watchparty",
+    "webrtc",
+    "peerjs",
+    "socket.io",
+    "screensharing",
+    "react",
+    "tailwindcss"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
+    "peer": "^1.0.2",
+    "socket.io": "^4.7.5"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "nodemon": "^3.1.4"
+  }
+}
