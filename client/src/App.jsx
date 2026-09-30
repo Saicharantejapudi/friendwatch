@@ -117,6 +117,7 @@ export default function App() {
   const localVideoRef = useRef(null);
   const pinnedLocalVideoRef = useRef(null);
   const screenVideoRef = useRef(null);
+  const remoteScreenAudioRef = useRef(null);
   const chatBottomRef = useRef(null);
   const mainPlayerContainerRef = useRef(null);
   const peerConnectionsRef = useRef({}); // { [peerId]: call }
@@ -417,15 +418,15 @@ export default function App() {
       }
     }
 
-    // 1. Ultra-Low Latency: Minimizes WebRTC playout buffer from ~1000ms down to 50ms
+    // 1. Ultra-Low Latency with Wi-Fi Jitter Protection: 150ms playout target prevents dropouts/stutter
     const configureReceivers = () => {
       try {
         pc.getReceivers().forEach(receiver => {
           if ('playoutDelayHint' in receiver) {
-            receiver.playoutDelayHint = 0.05; // 50ms playout target
+            receiver.playoutDelayHint = isScreenShare ? 0.15 : 0.08; // 150ms buffer for seamless movie audio
           }
           if ('jitterBufferTarget' in receiver) {
-            receiver.jitterBufferTarget = 50; // 50ms jitter target
+            receiver.jitterBufferTarget = isScreenShare ? 150 : 80;
           }
         });
       } catch (e) {
@@ -1036,8 +1037,9 @@ export default function App() {
           setLocalStream(stream);
         }
 
-        // Add/replace track in active peer connections
-        Object.values(peerConnectionsRef.current).forEach(call => {
+        // Add/replace track in active webcam/mic peer connections ONLY (NEVER touch screen share)
+        Object.entries(peerConnectionsRef.current).forEach(([key, call]) => {
+          if (key.startsWith('screen-') || call.metadata?.type === 'screen-share') return;
           try {
             const senders = call.peerConnection?.getSenders() || [];
             const audioSender = senders.find(s => s.track?.kind === 'audio');
@@ -1064,25 +1066,10 @@ export default function App() {
 
     const audioTrack = stream.getAudioTracks()[0];
     if (audioTrack) {
-      if (!isMicMuted) {
-        // True hardware release: stop the track so Windows & Bluetooth immediately exit VoIP / Hands-Free mode
-        audioTrack.stop();
-        stream.removeTrack(audioTrack);
-        setIsMicMuted(true);
-        socketRef.current?.emit('media-status-change', { isMuted: true });
-        Object.values(peerConnectionsRef.current).forEach(call => {
-          try {
-            const senders = call.peerConnection?.getSenders() || [];
-            const audioSender = senders.find(s => s.track?.kind === 'audio');
-            if (audioSender) {
-              audioSender.replaceTrack(null);
-            }
-          } catch (e) {
-            console.warn('Error clearing audio track in peer connection:', e);
-          }
-        });
-        return;
-      }
+      const nextMuted = !isMicMuted;
+      audioTrack.enabled = !nextMuted;
+      setIsMicMuted(nextMuted);
+      socketRef.current?.emit('media-status-change', { isMuted: nextMuted });
     }
   };
 
@@ -1112,8 +1099,9 @@ export default function App() {
           localVideoRef.current.srcObject = stream;
         }
 
-        // Add/replace track in active peer connections
-        Object.values(peerConnectionsRef.current).forEach(call => {
+        // Add/replace track in active webcam peer connections ONLY (NEVER touch screen share)
+        Object.entries(peerConnectionsRef.current).forEach(([key, call]) => {
+          if (key.startsWith('screen-') || call.metadata?.type === 'screen-share') return;
           try {
             const senders = call.peerConnection?.getSenders() || [];
             const videoSender = senders.find(s => s.track?.kind === 'video');
@@ -1139,8 +1127,8 @@ export default function App() {
 
     const videoTrack = stream.getVideoTracks()[0];
     if (videoTrack) {
-      videoTrack.enabled = !videoTrack.enabled;
       const off = !videoTrack.enabled;
+      videoTrack.enabled = !off;
       setIsCameraOff(off);
       socketRef.current?.emit('media-status-change', { isCameraOff: off });
     }
@@ -1150,28 +1138,35 @@ export default function App() {
     const newMutedState = !isSpeakerMuted;
     setIsSpeakerMuted(newMutedState);
 
-    if (screenVideoRef.current && !roomState.isHost) {
-      screenVideoRef.current.muted = newMutedState;
+    if (remoteScreenAudioRef.current && !roomState.isHost) {
+      remoteScreenAudioRef.current.muted = newMutedState;
     }
   };
 
-  // Sync screen video volume and mute status for audience
+  // Sync screen audio volume and mute status for audience
   useEffect(() => {
-    if (screenVideoRef.current && !roomState.isHost) {
-      screenVideoRef.current.volume = screenVolume;
-      screenVideoRef.current.muted = isSpeakerMuted;
+    if (remoteScreenAudioRef.current && !roomState.isHost) {
+      remoteScreenAudioRef.current.volume = screenVolume;
+      remoteScreenAudioRef.current.muted = isSpeakerMuted;
     }
   }, [screenVolume, isSpeakerMuted, roomState.isHost]);
 
-  // Sync remote screen stream to video element for audience
+  // Sync remote screen stream to video & dedicated audio elements for audience
   useEffect(() => {
-    if (screenVideoRef.current && remoteScreenStream && !roomState.isHost) {
-      if (screenVideoRef.current.srcObject !== remoteScreenStream) {
+    if (!roomState.isHost && remoteScreenStream) {
+      if (screenVideoRef.current && screenVideoRef.current.srcObject !== remoteScreenStream) {
         screenVideoRef.current.srcObject = remoteScreenStream;
+        screenVideoRef.current.muted = true; // Video element is always muted; audio element handles playback
         screenVideoRef.current.play().catch(e => console.warn('Screen video sync error:', e));
       }
+      if (remoteScreenAudioRef.current && remoteScreenAudioRef.current.srcObject !== remoteScreenStream) {
+        remoteScreenAudioRef.current.srcObject = remoteScreenStream;
+        remoteScreenAudioRef.current.volume = screenVolume;
+        remoteScreenAudioRef.current.muted = isSpeakerMuted;
+        remoteScreenAudioRef.current.play().catch(e => console.warn('Remote screen audio sync error:', e));
+      }
     }
-  }, [remoteScreenStream, roomState.isHost]);
+  }, [remoteScreenStream, roomState.isHost, screenVolume, isSpeakerMuted]);
 
   const handleTogglePin = (userToPin) => {
     if (pinnedUser && pinnedUser.userId === userToPin.userId) {
@@ -2231,17 +2226,9 @@ export default function App() {
         ))}
 
         {/* Dedicated audio receiver for Screen Share System / Movie Audio (Full 48kHz Stereo) */}
-        {remoteScreenStream && !roomState.isHost && (
+        {!roomState.isHost && (
           <audio
-            key="remote-screen-audio"
-            ref={el => {
-              if (el && el.srcObject !== remoteScreenStream) {
-                el.srcObject = remoteScreenStream;
-                el.volume = screenVolume;
-                el.muted = isSpeakerMuted;
-                el.play().catch(e => console.warn('Remote screen audio play error:', e));
-              }
-            }}
+            ref={remoteScreenAudioRef}
             autoPlay
             playsInline
             muted={isSpeakerMuted}
