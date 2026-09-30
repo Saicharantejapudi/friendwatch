@@ -130,6 +130,22 @@ To test multiple participants locally:
 
 ---
 
+## 🍃 Connecting MongoDB Atlas (Cloud Database)
+
+FriendWatch supports both **local persistent storage** (`data/users.json`) and **Cloud MongoDB Atlas**.
+
+To switch to MongoDB Atlas:
+1. Create a free M0 cluster at [MongoDB Atlas](https://www.mongodb.com/atlas).
+2. Create a database user & password in **Database Access**.
+3. Allow network access from anywhere (`0.0.0.0/0`) in **Network Access**.
+4. In your `.env` file, add your connection string:
+   ```env
+   MONGO_URI=mongodb+srv://<username>:<password>@cluster0.xxxxx.mongodb.net/friendwatch?retryWrites=true&w=majority
+   ```
+5. Restart your server. FriendWatch will automatically connect and sync user accounts in the cloud!
+
+---
+
 ## 📦 Production Deployment
 
 To build and serve the production bundle through the Node.js Express server:
