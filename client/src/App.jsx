@@ -37,7 +37,9 @@ import {
   ShieldAlert,
   Crown,
   Smile,
-  AlertCircle
+  AlertCircle,
+  Pin,
+  PinOff
 } from 'lucide-react';
 
 // Backend server URL - adjust if running in production
@@ -95,12 +97,14 @@ export default function App() {
   const [remoteStreams, setRemoteStreams] = useState({}); // { [peerId]: MediaStream }
 
   // ---------------------------------------------------------------------------
-  // CHAT & UI STATE
+  // CHAT & UI & PINNING STATE
   // ---------------------------------------------------------------------------
   const [messages, setMessages] = useState([]);
   const [chatInput, setChatInput] = useState('');
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isChatOpen, setIsChatOpen] = useState(true);
+  const [pinnedUser, setPinnedUser] = useState(null); // { userId, username, peerId, isLocal }
+  const [mainStageView, setMainStageView] = useState('auto'); // 'auto' | 'screen' | 'pin'
 
   // ---------------------------------------------------------------------------
   // REFS FOR SOCKET, PEER, AUDIO ANALYZERS & MEDIA ELEMENTS
@@ -109,12 +113,40 @@ export default function App() {
   const peerRef = useRef(null);
   const screenPeerRef = useRef(null);
   const localVideoRef = useRef(null);
+  const pinnedLocalVideoRef = useRef(null);
   const screenVideoRef = useRef(null);
   const chatBottomRef = useRef(null);
   const mainPlayerContainerRef = useRef(null);
   const peerConnectionsRef = useRef({}); // { [peerId]: call }
   const audioContextRef = useRef(null);
   const audioAnalyzersRef = useRef({}); // { [id]: { analyser, dataArray } }
+
+  // Live mutable refs to eliminate stale closure bugs across WebRTC callbacks
+  const localStreamRef = useRef(null);
+  const screenStreamRef = useRef(null);
+  const roomStateRef = useRef(roomState);
+
+  useEffect(() => {
+    localStreamRef.current = localStream;
+  }, [localStream]);
+
+  useEffect(() => {
+    screenStreamRef.current = screenStream;
+  }, [screenStream]);
+
+  useEffect(() => {
+    roomStateRef.current = roomState;
+  }, [roomState]);
+
+  // Keep local video elements attached to local stream
+  useEffect(() => {
+    if (localVideoRef.current && localStream) {
+      localVideoRef.current.srcObject = localStream;
+    }
+    if (pinnedLocalVideoRef.current && localStream) {
+      pinnedLocalVideoRef.current.srcObject = localStream;
+    }
+  }, [localStream, pinnedUser]);
 
   // ---------------------------------------------------------------------------
   // 1. INITIALIZE & VALIDATE PERSISTENT AUTH SESSION
@@ -329,7 +361,93 @@ export default function App() {
   }, [currentUser, authToken]);
 
   // ---------------------------------------------------------------------------
-  // 4. ENTER ROOM (CREATE AS HOST OR JOIN WITH CODE)
+  // 4. WEBRTC PEER INITIALIZATION WITH GLOBAL STUN SERVERS
+  // ---------------------------------------------------------------------------
+  const initPeer = useCallback(() => {
+    return new Promise((resolve) => {
+      if (peerRef.current && !peerRef.current.destroyed) {
+        return resolve(peerRef.current);
+      }
+
+      const isLocal = window.location.hostname === 'localhost';
+      const peerOptions = isLocal ? {
+        host: 'localhost',
+        port: 5000,
+        path: '/peerjs',
+        config: {
+          iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' },
+            { urls: 'stun:stun2.l.google.com:19302' },
+            { urls: 'stun:stun3.l.google.com:19302' },
+            { urls: 'stun:stun4.l.google.com:19302' }
+          ]
+        }
+      } : {
+        config: {
+          iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' },
+            { urls: 'stun:stun2.l.google.com:19302' },
+            { urls: 'stun:stun3.l.google.com:19302' },
+            { urls: 'stun:stun4.l.google.com:19302' }
+          ]
+        }
+      };
+
+      const peer = new Peer(undefined, peerOptions);
+      peerRef.current = peer;
+
+      peer.on('open', (peerId) => {
+        console.log('[PeerJS Ready] Peer ID assigned:', peerId);
+        if (socketRef.current?.connected) {
+          socketRef.current.emit('update-peer-id', {
+            peerId,
+            roomId: roomStateRef.current.roomId
+          });
+        }
+        resolve(peer);
+      });
+
+      peer.on('error', (err) => {
+        console.warn('[PeerJS Notice]:', err);
+        resolve(peer);
+      });
+
+      // Handle incoming WebRTC calls (Webcam mesh or Host Screen Share)
+      peer.on('call', (call) => {
+        console.log('[WebRTC Incoming Call] from:', call.peer, 'Metadata:', call.metadata);
+        const isScreenShareCall = call.metadata && call.metadata.type === 'screen-share';
+
+        if (isScreenShareCall) {
+          call.answer();
+          call.on('stream', (screenMediaStream) => {
+            console.log('[WebRTC Screen] Remote screen stream received');
+            setRemoteScreenStream(screenMediaStream);
+            setIsScreenSharing(true);
+            if (screenVideoRef.current) {
+              screenVideoRef.current.srcObject = screenMediaStream;
+              screenVideoRef.current.play().catch(e => console.warn('Screen autoplay error:', e));
+            }
+          });
+        } else {
+          // Answer webcam call with current local stream if available
+          const currentStream = localStreamRef.current;
+          call.answer(currentStream || undefined);
+          call.on('stream', (userMediaStream) => {
+            console.log('[WebRTC Mesh] Received remote stream from:', call.peer);
+            setRemoteStreams(prev => ({ ...prev, [call.peer]: userMediaStream }));
+            setupAudioAnalysis(userMediaStream, call.peer);
+          });
+        }
+
+        peerConnectionsRef.current[call.peer] = call;
+      });
+    });
+  }, []);
+
+  // ---------------------------------------------------------------------------
+  // 5. ENTER ROOM (CREATE AS HOST OR JOIN WITH CODE)
   // ---------------------------------------------------------------------------
   const setupRoomConnection = useCallback(async (roomId, isCreating = false, roomName = '') => {
     if (!currentUser || !authToken) return;
@@ -344,8 +462,10 @@ export default function App() {
     }, 15000);
 
     try {
-      // 1. Initialize user webcam/mic stream in parallel
+      // 1. Initialize user webcam/mic & PeerJS in parallel
       const streamPromise = initializeUserMedia();
+      const peerPromise = initPeer();
+      const [stream, peer] = await Promise.all([streamPromise, peerPromise]);
 
       // 2. Get or initialize Socket.io
       let socket = socketRef.current;
@@ -361,76 +481,69 @@ export default function App() {
         socketRef.current = socket;
       }
 
-      // 3. Connect to PeerJS (Local on localhost, Public PeerJS Cloud in production)
-      const isLocal = window.location.hostname === 'localhost';
-      const peer = new Peer(undefined, isLocal ? {
-        host: 'localhost',
-        port: 5000,
-        path: '/peerjs'
-      } : {
-        // Free reliable global PeerJS signaling mesh on HTTPS
-      });
-      peerRef.current = peer;
-
-      peer.on('open', (peerId) => {
-        console.log('[PeerJS Ready] Peer ID:', peerId);
-        if (socketRef.current) {
-          socketRef.current.emit('update-peer-id', { peerId });
-        }
-      });
-
-      peer.on('error', (err) => {
-        console.warn('[PeerJS Notice]:', err);
-      });
-
-      // Handle incoming WebRTC calls
-      peer.on('call', (call) => {
-        console.log('[WebRTC] Incoming call from:', call.peer);
-        const isScreenShareCall = call.metadata && call.metadata.type === 'screen-share';
-
-        if (isScreenShareCall) {
-          call.answer();
-          call.on('stream', (screenMediaStream) => {
-            setRemoteScreenStream(screenMediaStream);
-            setIsScreenSharing(true);
-            if (screenVideoRef.current) {
-              screenVideoRef.current.srcObject = screenMediaStream;
-            }
-          });
-        } else {
-          streamPromise.then((userStream) => {
-            call.answer(userStream);
-            call.on('stream', (userMediaStream) => {
-              setRemoteStreams(prev => ({ ...prev, [call.peer]: userMediaStream }));
-              setupAudioAnalysis(userMediaStream, call.peer);
-            });
-          });
-        }
-
-        peerConnectionsRef.current[call.peer] = call;
-      });
-
-      // 4. Socket room event handlers
-      socket.on('user-joined', ({ participant, participantsCount }) => {
-        console.log('[Socket] New participant joined:', participant.username);
+      // 3. Socket room event handlers
+      socket.off('user-joined');
+      socket.on('user-joined', ({ participant }) => {
+        console.log('[Socket] New participant joined:', participant.username, 'PeerID:', participant.peerId);
         setRoomState(prev => ({
           ...prev,
           participants: [...prev.participants.filter(p => p.socketId !== participant.socketId), participant]
         }));
 
-        streamPromise.then(stream => {
-          if (participant.peerId && stream && peerRef.current) {
-            connectToNewUser(participant.peerId, stream);
-          }
-        });
+        const currentStream = localStreamRef.current;
+        if (participant.peerId && currentStream && peerRef.current) {
+          connectToNewUser(participant.peerId, currentStream);
+        }
+
+        // If host is already screen sharing, call the new user with the screen stream!
+        if (participant.peerId && screenStreamRef.current && roomStateRef.current.isHost && peerRef.current) {
+          console.log('[WebRTC Screen] Calling joining user with screen share:', participant.peerId);
+          peerRef.current.call(participant.peerId, screenStreamRef.current, {
+            metadata: { type: 'screen-share', isHost: true }
+          });
+        }
       });
 
-      socket.on('user-left', ({ socketId, peerId, username }) => {
+      // Crucial: Handle when peer finishes initializing their PeerJS ID
+      socket.off('peer-id-updated');
+      socket.on('peer-id-updated', ({ socketId, peerId }) => {
+        console.log('[Socket] Participant peer ID updated:', socketId, peerId);
+        setRoomState(prev => ({
+          ...prev,
+          participants: prev.participants.map(p =>
+            p.socketId === socketId ? { ...p, peerId } : p
+          )
+        }));
+
+        const currentStream = localStreamRef.current;
+        if (peerId && currentStream && peerRef.current) {
+          connectToNewUser(peerId, currentStream);
+        }
+
+        // If host is already screen sharing, send screen stream to newly ready peer
+        if (peerId && screenStreamRef.current && roomStateRef.current.isHost && peerRef.current) {
+          console.log('[WebRTC Screen] Calling newly ready peer with screen share:', peerId);
+          peerRef.current.call(peerId, screenStreamRef.current, {
+            metadata: { type: 'screen-share', isHost: true }
+          });
+        }
+      });
+
+      socket.off('user-left');
+      socket.on('user-left', ({ socketId, peerId, userId, username }) => {
         console.log('[Socket] Participant left:', username);
         setRoomState(prev => ({
           ...prev,
           participants: prev.participants.filter(p => p.socketId !== socketId)
         }));
+
+        // Clean up pinning if leaving user was pinned
+        setPinnedUser(prev => {
+          if (prev && (prev.userId === userId || prev.peerId === peerId)) {
+            return null;
+          }
+          return prev;
+        });
 
         if (peerId) {
           if (peerConnectionsRef.current[peerId]) {
@@ -446,11 +559,13 @@ export default function App() {
         }
       });
 
+      socket.off('screen-share-active');
       socket.on('screen-share-active', ({ hostUsername, peerId }) => {
-        console.log('[Socket] Screen share is active from host:', hostUsername, 'PeerID:', peerId);
+        console.log('[Socket] Screen share active from host:', hostUsername, 'PeerID:', peerId);
         setIsScreenSharing(true);
       });
 
+      socket.off('screen-share-stopped');
       socket.on('screen-share-stopped', () => {
         console.log('[Socket] Screen share ended');
         setIsScreenSharing(false);
@@ -460,6 +575,7 @@ export default function App() {
         }
       });
 
+      socket.off('participant-media-status');
       socket.on('participant-media-status', ({ socketId, isMuted, isCameraOff }) => {
         setRoomState(prev => ({
           ...prev,
@@ -472,7 +588,8 @@ export default function App() {
         }));
       });
 
-      socket.on('host-changed', ({ newHostUserId, newHostUsername }) => {
+      socket.off('host-changed');
+      socket.on('host-changed', ({ newHostUserId }) => {
         const isNowHost = currentUser.id === newHostUserId;
         setRoomState(prev => ({
           ...prev,
@@ -484,22 +601,24 @@ export default function App() {
         }));
       });
 
+      socket.off('chat-message');
       socket.on('chat-message', (msg) => {
         setMessages(prev => [...prev, msg]);
       });
 
+      socket.off('error');
       socket.on('error', ({ message }) => {
         setLobbyError(message);
         leaveRoom();
       });
 
-      // 5. Execute action immediately or once connected
+      // 4. Execute action immediately or once connected
       const executeAction = () => {
         if (isCreating) {
           socket.emit('create-room', { roomName: roomName || `${currentUser.username}'s Party` }, (res) => {
             clearTimeout(timeoutTimer);
             if (res.success) {
-              joinRoomWithPeer(socket, peer, streamPromise, res.roomId);
+              joinRoomWithPeer(socket, peer, stream, res.roomId);
             } else {
               setLobbyError(res.error || 'Failed to create room');
               setIsLobbyLoading(false);
@@ -507,7 +626,7 @@ export default function App() {
           });
         } else {
           clearTimeout(timeoutTimer);
-          joinRoomWithPeer(socket, peer, streamPromise, roomId);
+          joinRoomWithPeer(socket, peer, stream, roomId);
         }
       };
 
@@ -527,7 +646,7 @@ export default function App() {
       setLobbyError(err.message || 'Connection failed');
       setIsLobbyLoading(false);
     }
-  }, [currentUser, authToken]);
+  }, [currentUser, authToken, initPeer]);
 
   /**
    * Complete the join-room handshake once PeerJS is ready
@@ -561,31 +680,42 @@ export default function App() {
   };
 
   /**
-   * Connect to a newly discovered peer using WebRTC mesh
+   * Connect to a peer using WebRTC mesh
    */
   const connectToNewUser = (remotePeerId, stream) => {
-    if (!peerRef.current || !stream) return;
+    if (!peerRef.current || !stream || !remotePeerId) return;
+    if (peerConnectionsRef.current[remotePeerId]) {
+      console.log('[WebRTC Mesh] Already connected to peer:', remotePeerId);
+      return;
+    }
     console.log('[WebRTC Mesh] Calling peer:', remotePeerId);
 
-    const call = peerRef.current.call(remotePeerId, stream, {
-      metadata: { type: 'webcam-mesh', userId: currentUser.id }
-    });
-
-    call.on('stream', (userMediaStream) => {
-      setRemoteStreams(prev => ({ ...prev, [remotePeerId]: userMediaStream }));
-      setupAudioAnalysis(userMediaStream, remotePeerId);
-    });
-
-    call.on('close', () => {
-      setRemoteStreams(prev => {
-        const updated = { ...prev };
-        delete updated[remotePeerId];
-        return updated;
+    try {
+      const call = peerRef.current.call(remotePeerId, stream, {
+        metadata: { type: 'webcam-mesh', userId: currentUser.id }
       });
-      delete audioAnalyzersRef.current[remotePeerId];
-    });
 
-    peerConnectionsRef.current[remotePeerId] = call;
+      if (!call) return;
+
+      call.on('stream', (userMediaStream) => {
+        console.log('[WebRTC Mesh] Call stream established with:', remotePeerId);
+        setRemoteStreams(prev => ({ ...prev, [remotePeerId]: userMediaStream }));
+        setupAudioAnalysis(userMediaStream, remotePeerId);
+      });
+
+      call.on('close', () => {
+        setRemoteStreams(prev => {
+          const updated = { ...prev };
+          delete updated[remotePeerId];
+          return updated;
+        });
+        delete audioAnalyzersRef.current[remotePeerId];
+      });
+
+      peerConnectionsRef.current[remotePeerId] = call;
+    } catch (err) {
+      console.warn('[WebRTC Call Error]:', err);
+    }
   };
 
   /**
@@ -617,7 +747,9 @@ export default function App() {
       screenPeerRef.current = null;
     }
 
-    Object.values(peerConnectionsRef.current).forEach(call => call.close());
+    Object.values(peerConnectionsRef.current).forEach(call => {
+      try { call.close(); } catch (_) {}
+    });
     peerConnectionsRef.current = {};
 
     setRoomState({ roomId: null, roomName: '', isHost: false, participants: [] });
@@ -626,6 +758,8 @@ export default function App() {
     setIsScreenSharing(false);
     setMessages([]);
     setIsLobbyLoading(false);
+    setPinnedUser(null);
+    setMainStageView('auto');
   };
 
   // Auto-scroll chat to bottom
@@ -634,10 +768,9 @@ export default function App() {
   }, [messages]);
 
   // ---------------------------------------------------------------------------
-  // 4. HOST SCREEN SHARING WITH SYSTEM / TAB AUDIO CAPTURE
+  // 6. HOST SCREEN SHARING WITH SYSTEM / TAB AUDIO CAPTURE
   // ---------------------------------------------------------------------------
   const handleToggleScreenShare = async () => {
-    // Strict Access Control: Only Room Host can trigger Screen Sharing
     if (!roomState.isHost) {
       alert('Strict Access Control: Only the Room Host can share screen.');
       return;
@@ -656,7 +789,6 @@ export default function App() {
     }
 
     try {
-      // Prompt specification: capture tab/system audio alongside 1080p video
       const displayStream = await navigator.mediaDevices.getDisplayMedia({
         video: {
           cursor: 'always',
@@ -675,9 +807,9 @@ export default function App() {
 
       if (screenVideoRef.current) {
         screenVideoRef.current.srcObject = displayStream;
+        screenVideoRef.current.play().catch(e => console.warn('Screen play error:', e));
       }
 
-      // Handle user stopping screen share via browser native banner
       displayStream.getVideoTracks()[0].onended = () => {
         handleToggleScreenShare();
       };
@@ -691,20 +823,60 @@ export default function App() {
         }
       });
 
-      // Notify socket server
       socketRef.current?.emit('start-screen-share', { screenPeerId: peerRef.current?.id });
-
     } catch (err) {
       console.warn('Screen share cancelled or failed:', err);
     }
   };
 
   // ---------------------------------------------------------------------------
-  // 5. MEDIA CONTROLS (MIC, CAMERA, SPEAKER, CHAT)
+  // 7. MEDIA CONTROLS (MIC, CAMERA, SPEAKER, PINNING)
   // ---------------------------------------------------------------------------
-  const toggleMicrophone = () => {
-    if (!localStream) return;
-    const audioTrack = localStream.getAudioTracks()[0];
+  const toggleMicrophone = async () => {
+    let stream = localStreamRef.current;
+
+    // If no stream or no audio track exists yet, dynamically request microphone
+    if (!stream || stream.getAudioTracks().length === 0) {
+      try {
+        const audioStream = await navigator.mediaDevices.getUserMedia({
+          audio: DISCORD_AUDIO_CONSTRAINTS
+        });
+        const newAudioTrack = audioStream.getAudioTracks()[0];
+
+        if (stream) {
+          stream.addTrack(newAudioTrack);
+        } else {
+          stream = audioStream;
+          setLocalStream(stream);
+        }
+
+        // Add/replace track in active peer connections
+        Object.values(peerConnectionsRef.current).forEach(call => {
+          try {
+            const senders = call.peerConnection?.getSenders() || [];
+            const audioSender = senders.find(s => s.track?.kind === 'audio');
+            if (audioSender) {
+              audioSender.replaceTrack(newAudioTrack);
+            } else if (call.peerConnection?.addTrack) {
+              call.peerConnection.addTrack(newAudioTrack, stream);
+            }
+          } catch (e) {
+            console.warn('Error replacing audio track in peer connection:', e);
+          }
+        });
+
+        setIsMicMuted(false);
+        socketRef.current?.emit('media-status-change', { isMuted: false });
+        setupAudioAnalysis(stream, 'local');
+        return;
+      } catch (err) {
+        console.error('Failed to get microphone track:', err);
+        alert('Could not access microphone: ' + (err.message || 'Permission denied'));
+        return;
+      }
+    }
+
+    const audioTrack = stream.getAudioTracks()[0];
     if (audioTrack) {
       audioTrack.enabled = !audioTrack.enabled;
       const muted = !audioTrack.enabled;
@@ -713,9 +885,58 @@ export default function App() {
     }
   };
 
-  const toggleCamera = () => {
-    if (!localStream) return;
-    const videoTrack = localStream.getVideoTracks()[0];
+  const toggleCamera = async () => {
+    let stream = localStreamRef.current;
+
+    // If no stream or no video track exists yet, dynamically request camera
+    if (!stream || stream.getVideoTracks().length === 0) {
+      try {
+        const videoStream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            width: { ideal: 640 },
+            height: { ideal: 480 },
+            frameRate: { ideal: 30 }
+          }
+        });
+        const newVideoTrack = videoStream.getVideoTracks()[0];
+
+        if (stream) {
+          stream.addTrack(newVideoTrack);
+        } else {
+          stream = videoStream;
+          setLocalStream(stream);
+        }
+
+        if (localVideoRef.current) {
+          localVideoRef.current.srcObject = stream;
+        }
+
+        // Add/replace track in active peer connections
+        Object.values(peerConnectionsRef.current).forEach(call => {
+          try {
+            const senders = call.peerConnection?.getSenders() || [];
+            const videoSender = senders.find(s => s.track?.kind === 'video');
+            if (videoSender) {
+              videoSender.replaceTrack(newVideoTrack);
+            } else if (call.peerConnection?.addTrack) {
+              call.peerConnection.addTrack(newVideoTrack, stream);
+            }
+          } catch (e) {
+            console.warn('Error replacing video track in peer connection:', e);
+          }
+        });
+
+        setIsCameraOff(false);
+        socketRef.current?.emit('media-status-change', { isCameraOff: false });
+        return;
+      } catch (err) {
+        console.error('Failed to get camera track:', err);
+        alert('Could not access camera: ' + (err.message || 'Permission denied'));
+        return;
+      }
+    }
+
+    const videoTrack = stream.getVideoTracks()[0];
     if (videoTrack) {
       videoTrack.enabled = !videoTrack.enabled;
       const off = !videoTrack.enabled;
@@ -728,9 +949,19 @@ export default function App() {
     const newMutedState = !isSpeakerMuted;
     setIsSpeakerMuted(newMutedState);
 
-    // Mute/unmute all remote audio elements
     if (screenVideoRef.current) {
       screenVideoRef.current.muted = newMutedState;
+    }
+  };
+
+  const handleTogglePin = (userToPin) => {
+    if (pinnedUser && pinnedUser.userId === userToPin.userId) {
+      // Toggle off if already pinned
+      setPinnedUser(null);
+      setMainStageView('auto');
+    } else {
+      setPinnedUser(userToPin);
+      setMainStageView('pin');
     }
   };
 
@@ -1133,16 +1364,121 @@ export default function App() {
         >
           {/* Main Video Stream Container (16:9 Aspect Ratio & Letterboxing) */}
           <div className="flex-1 flex items-center justify-center relative w-full h-full rounded-xl overflow-hidden bg-slate-950 border border-slate-800/60 shadow-2xl">
-            {/* Live Host Screen Share Video */}
+            {/* View Switcher Tabs (Shown when BOTH Screen Share and Pinned Person are active) */}
+            {isScreenSharing && pinnedUser && (
+              <div className="absolute top-4 left-1/2 transform -translate-x-1/2 flex items-center p-1 rounded-xl bg-slate-900/90 border border-slate-700/80 shadow-2xl backdrop-blur-md z-30">
+                <button
+                  onClick={() => setMainStageView('screen')}
+                  className={`px-3 py-1 rounded-lg text-xs font-medium transition cursor-pointer flex items-center gap-1.5 ${
+                    mainStageView === 'screen'
+                      ? 'bg-brand-600 text-white shadow'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <MonitorPlay className="w-3.5 h-3.5" />
+                  <span>Screen Share (Live)</span>
+                </button>
+                <button
+                  onClick={() => setMainStageView('pin')}
+                  className={`px-3 py-1 rounded-lg text-xs font-medium transition cursor-pointer flex items-center gap-1.5 ${
+                    mainStageView !== 'screen'
+                      ? 'bg-brand-600 text-white shadow'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <Pin className="w-3.5 h-3.5" />
+                  <span>Pinned: {pinnedUser.username}</span>
+                </button>
+              </div>
+            )}
+
+            {/* 1. PINNED PARTICIPANT VIEW */}
+            {pinnedUser && (mainStageView === 'pin' || !isScreenSharing) ? (
+              <div className="relative w-full h-full flex items-center justify-center bg-slate-950">
+                {pinnedUser.isLocal ? (
+                  <>
+                    <video
+                      ref={pinnedLocalVideoRef}
+                      autoPlay
+                      muted
+                      playsInline
+                      className={`w-full h-full object-contain transform -scale-x-100 ${isCameraOff ? 'hidden' : 'block'}`}
+                    />
+                    {isCameraOff && (
+                      <div className="flex flex-col items-center justify-center p-8 text-center">
+                        <div className="w-24 h-24 rounded-3xl bg-brand-600/30 border border-brand-500/40 flex items-center justify-center font-bold text-3xl text-white shadow-2xl mb-4">
+                          {currentUser.username[0]?.toUpperCase()}
+                        </div>
+                        <h4 className="text-lg font-bold text-white mb-1">{currentUser.username} (You)</h4>
+                        <span className="text-xs text-slate-400">Camera is turned off</span>
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    {(() => {
+                      const stream = pinnedUser.peerId ? remoteStreams[pinnedUser.peerId] : null;
+                      const participantInfo = roomState.participants.find(p => p.userId === pinnedUser.userId);
+                      const isCamOff = participantInfo ? participantInfo.isCameraOff : false;
+
+                      if (stream && !isCamOff) {
+                        return (
+                          <ParticipantVideo
+                            stream={stream}
+                            isSpeakerMuted={isSpeakerMuted}
+                            className="w-full h-full object-contain"
+                          />
+                        );
+                      }
+
+                      return (
+                        <div className="flex flex-col items-center justify-center p-8 text-center">
+                          <div className="w-24 h-24 rounded-3xl bg-purple-600/30 border border-purple-500/40 flex items-center justify-center font-bold text-3xl text-white shadow-2xl mb-4">
+                            {pinnedUser.username[0]?.toUpperCase()}
+                          </div>
+                          <h4 className="text-lg font-bold text-white mb-1">{pinnedUser.username}</h4>
+                          <span className="text-xs text-slate-400">
+                            {isCamOff ? 'Camera is turned off' : 'Waiting for video stream...'}
+                          </span>
+                        </div>
+                      );
+                    })()}
+                  </>
+                )}
+
+                {/* Pinned Info Banner & Unpin Button */}
+                <div className="absolute top-4 left-4 flex items-center gap-2 z-20">
+                  <div className="px-3 py-1.5 rounded-lg bg-slate-900/90 border border-brand-500/50 text-brand-300 text-xs font-semibold flex items-center gap-1.5 shadow-xl backdrop-blur-md">
+                    <Pin className="w-3.5 h-3.5 text-brand-400" />
+                    <span>Pinned: {pinnedUser.username}</span>
+                  </div>
+                  <button
+                    onClick={() => {
+                      setPinnedUser(null);
+                      setMainStageView('auto');
+                    }}
+                    className="px-2.5 py-1.5 rounded-lg bg-slate-900/90 hover:bg-slate-800 border border-slate-700 text-slate-300 hover:text-white text-xs font-medium flex items-center gap-1 transition shadow-xl cursor-pointer"
+                    title="Unpin participant"
+                  >
+                    <PinOff className="w-3.5 h-3.5 text-rose-400" />
+                    <span>Unpin</span>
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
+            {/* 2. LIVE HOST SCREEN SHARE VIDEO (Kept mounted for uninterrupted audio playback) */}
             <video
               ref={screenVideoRef}
               autoPlay
               playsInline
-              className={`w-full h-full object-contain ${isScreenSharing ? 'block' : 'hidden'}`}
+              className={`w-full h-full object-contain ${
+                isScreenSharing && (!pinnedUser || mainStageView === 'screen') ? 'block' : 'hidden'
+              }`}
             />
 
-            {/* Waiting / Cinema Placeholder when no screen is active */}
-            {!isScreenSharing && (
+            {/* 3. CINEMA SCREEN IS IDLE PLACEHOLDER */}
+            {!isScreenSharing && !pinnedUser && (
               <div className="flex flex-col items-center justify-center p-8 text-center max-w-md">
                 <div className="w-20 h-20 rounded-2xl bg-slate-900/90 border border-slate-800 flex items-center justify-center mb-5 shadow-2xl">
                   <MonitorPlay className="w-10 h-10 text-brand-500 animate-pulse-subtle" />
@@ -1151,7 +1487,7 @@ export default function App() {
                 <p className="text-slate-400 text-xs leading-relaxed mb-6">
                   {roomState.isHost
                     ? "You are the Room Host! Click 'Share Screen' below to stream your movie, anime, or video with audio."
-                    : "Waiting for the Room Host to start screen sharing. In the meantime, chat and hang out in the webcam mesh!"}
+                    : "Waiting for the Room Host to start screen sharing. In the meantime, chat, or pin a friend's video to enlarge!"}
                 </p>
 
                 {roomState.isHost ? (
@@ -1172,7 +1508,7 @@ export default function App() {
             )}
 
             {/* Top Overlay Badge inside Video Container */}
-            {isScreenSharing && (
+            {isScreenSharing && (!pinnedUser || mainStageView === 'screen') && (
               <div className="absolute top-4 left-4 flex items-center gap-2 z-10 pointer-events-none">
                 <div className="px-2.5 py-1 rounded-md bg-rose-600/90 text-white text-[11px] font-bold uppercase tracking-wider flex items-center gap-1.5 shadow-lg backdrop-blur-sm">
                   <span className="w-2 h-2 rounded-full bg-white animate-ping" />
@@ -1188,7 +1524,7 @@ export default function App() {
             <button
               onClick={toggleFullscreen}
               title={isFullscreen ? 'Exit Fullscreen' : 'Enter Fullscreen'}
-              className="absolute top-4 right-4 p-2 rounded-lg bg-slate-900/80 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-700/60 backdrop-blur-sm transition z-10"
+              className="absolute top-4 right-4 p-2 rounded-lg bg-slate-900/80 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-700/60 backdrop-blur-sm transition z-10 cursor-pointer"
             >
               {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
             </button>
@@ -1227,7 +1563,7 @@ export default function App() {
               )}
             </div>
 
-            {/* Quick Media Audio/Video Toggles */}
+            {/* Media Audio/Video Toggles */}
             <div className="flex items-center gap-2">
               {/* Mic Toggle */}
               <button
@@ -1236,7 +1572,7 @@ export default function App() {
                 className={`p-2.5 rounded-lg text-xs font-medium transition cursor-pointer ${
                   isMicMuted
                     ? 'bg-rose-500/20 text-rose-400 border border-rose-500/40'
-                    : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700'
+                    : 'bg-slate-800 hover:bg-slate-700 text-emerald-400 border border-slate-700'
                 }`}
               >
                 {isMicMuted ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
@@ -1249,7 +1585,7 @@ export default function App() {
                 className={`p-2.5 rounded-lg text-xs font-medium transition cursor-pointer ${
                   isCameraOff
                     ? 'bg-rose-500/20 text-rose-400 border border-rose-500/40'
-                    : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700'
+                    : 'bg-slate-800 hover:bg-slate-700 text-blue-400 border border-slate-700'
                 }`}
               >
                 {isCameraOff ? <VideoOff className="w-4 h-4" /> : <Video className="w-4 h-4" />}
@@ -1273,7 +1609,7 @@ export default function App() {
             <div>
               <button
                 onClick={() => setIsChatOpen(!isChatOpen)}
-                className={`p-2 rounded-lg text-xs border transition ${
+                className={`p-2 rounded-lg text-xs border transition cursor-pointer ${
                   isChatOpen
                     ? 'bg-brand-500/20 border-brand-500/40 text-brand-400'
                     : 'bg-slate-800 border-slate-700 text-slate-400 hover:text-white'
@@ -1307,10 +1643,10 @@ export default function App() {
               </div>
 
               {/* 2x3 Grid Container */}
-              <div className="grid grid-cols-2 gap-2 h-52 overflow-y-auto pr-1">
+              <div className="grid grid-cols-2 gap-2 max-h-56 overflow-y-auto pr-1">
                 {/* 1. Local User Feed */}
                 <div
-                  className={`relative rounded-lg overflow-hidden bg-slate-800 border transition aspect-video flex items-center justify-center ${
+                  className={`relative rounded-lg overflow-hidden bg-slate-800 border transition aspect-video flex items-center justify-center group ${
                     activeSpeakers.has('local')
                       ? 'border-emerald-500 speaker-ring'
                       : 'border-slate-700/60'
@@ -1330,6 +1666,32 @@ export default function App() {
                       {currentUser.username[0]?.toUpperCase()}
                     </div>
                   )}
+
+                  {/* Pin Button */}
+                  {(() => {
+                    const isLocalPinned = pinnedUser && pinnedUser.userId === currentUser.id;
+                    return (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleTogglePin({
+                            userId: currentUser.id,
+                            username: currentUser.username,
+                            peerId: peerRef.current?.id,
+                            isLocal: true
+                          });
+                        }}
+                        title={isLocalPinned ? "Unpin yourself" : "Pin yourself to main screen"}
+                        className={`absolute top-1 right-1 p-1 rounded transition backdrop-blur-xs z-10 cursor-pointer ${
+                          isLocalPinned
+                            ? 'bg-brand-600 text-white shadow'
+                            : 'bg-black/60 hover:bg-black/90 text-slate-300 hover:text-white'
+                        }`}
+                      >
+                        {isLocalPinned ? <PinOff className="w-3 h-3 text-rose-300" /> : <Pin className="w-3 h-3" />}
+                      </button>
+                    );
+                  })()}
 
                   {/* Name Tag & Status Badges */}
                   <div className="absolute bottom-1 left-1 right-1 flex items-center justify-between px-1.5 py-0.5 rounded bg-black/60 backdrop-blur-xs text-[10px] text-white">
@@ -1351,11 +1713,12 @@ export default function App() {
                   .map(participant => {
                     const stream = participant.peerId ? remoteStreams[participant.peerId] : null;
                     const isSpeaking = participant.peerId && activeSpeakers.has(participant.peerId);
+                    const isPinned = pinnedUser && pinnedUser.userId === participant.userId;
 
                     return (
                       <div
                         key={participant.socketId}
-                        className={`relative rounded-lg overflow-hidden bg-slate-800 border transition aspect-video flex items-center justify-center ${
+                        className={`relative rounded-lg overflow-hidden bg-slate-800 border transition aspect-video flex items-center justify-center group ${
                           isSpeaking ? 'border-emerald-500 speaker-ring' : 'border-slate-700/60'
                         }`}
                       >
@@ -1366,6 +1729,27 @@ export default function App() {
                             {participant.username[0]?.toUpperCase()}
                           </div>
                         )}
+
+                        {/* Pin Button */}
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleTogglePin({
+                              userId: participant.userId,
+                              username: participant.username,
+                              peerId: participant.peerId,
+                              isLocal: false
+                            });
+                          }}
+                          title={isPinned ? `Unpin ${participant.username}` : `Pin ${participant.username} to main screen`}
+                          className={`absolute top-1 right-1 p-1 rounded transition backdrop-blur-xs z-10 cursor-pointer ${
+                            isPinned
+                              ? 'bg-brand-600 text-white shadow'
+                              : 'bg-black/60 hover:bg-black/90 text-slate-300 hover:text-white'
+                          }`}
+                        >
+                          {isPinned ? <PinOff className="w-3 h-3 text-rose-300" /> : <Pin className="w-3 h-3" />}
+                        </button>
 
                         {/* Name Tag & Status Badges */}
                         <div className="absolute bottom-1 left-1 right-1 flex items-center justify-between px-1.5 py-0.5 rounded bg-black/60 backdrop-blur-xs text-[10px] text-white">
@@ -1382,6 +1766,64 @@ export default function App() {
                       </div>
                     );
                   })}
+              </div>
+
+              {/* Dedicated Personal Media Controls Bar (Sidebar Dock - never obstructed by Chrome's bottom banner) */}
+              <div className="mt-2.5 pt-2 border-t border-slate-800/80 flex items-center justify-between px-1">
+                <div className="flex items-center gap-1.5 overflow-hidden">
+                  <div className="w-6 h-6 rounded-full bg-brand-600 flex items-center justify-center text-[10px] font-bold text-white flex-shrink-0">
+                    {currentUser.username[0]?.toUpperCase()}
+                  </div>
+                  <div className="flex flex-col min-w-0">
+                    <span className="text-[11px] font-semibold text-slate-200 truncate max-w-[80px]">
+                      {currentUser.username}
+                    </span>
+                    <span className="text-[9px] text-slate-400 leading-tight">
+                      {isMicMuted ? 'Muted' : 'Voice Connected'}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-1.5">
+                  {/* Mic Toggle */}
+                  <button
+                    onClick={toggleMicrophone}
+                    title={isMicMuted ? 'Unmute Microphone' : 'Mute Microphone'}
+                    className={`p-2 rounded-lg text-xs font-medium transition cursor-pointer ${
+                      isMicMuted
+                        ? 'bg-rose-500/20 text-rose-400 border border-rose-500/40'
+                        : 'bg-slate-800 hover:bg-slate-700 text-emerald-400 border border-slate-700'
+                    }`}
+                  >
+                    {isMicMuted ? <MicOff className="w-3.5 h-3.5" /> : <Mic className="w-3.5 h-3.5" />}
+                  </button>
+
+                  {/* Camera Toggle */}
+                  <button
+                    onClick={toggleCamera}
+                    title={isCameraOff ? 'Turn Camera On' : 'Turn Camera Off'}
+                    className={`p-2 rounded-lg text-xs font-medium transition cursor-pointer ${
+                      isCameraOff
+                        ? 'bg-rose-500/20 text-rose-400 border border-rose-500/40'
+                        : 'bg-slate-800 hover:bg-slate-700 text-blue-400 border border-slate-700'
+                    }`}
+                  >
+                    {isCameraOff ? <VideoOff className="w-3.5 h-3.5" /> : <Video className="w-3.5 h-3.5" />}
+                  </button>
+
+                  {/* Deafen Toggle */}
+                  <button
+                    onClick={toggleSpeaker}
+                    title={isSpeakerMuted ? 'Unmute Audio' : 'Deafen Audio'}
+                    className={`p-2 rounded-lg text-xs font-medium transition cursor-pointer ${
+                      isSpeakerMuted
+                        ? 'bg-rose-500/20 text-rose-400 border border-rose-500/40'
+                        : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700'
+                    }`}
+                  >
+                    {isSpeakerMuted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
+                  </button>
+                </div>
               </div>
             </div>
 
@@ -1471,12 +1913,18 @@ export default function App() {
 /**
  * Subcomponent to safely attach participant media stream to video element
  */
-function ParticipantVideo({ stream, isSpeakerMuted }) {
+function ParticipantVideo({ stream, isSpeakerMuted, className = "w-full h-full object-cover transform -scale-x-100" }) {
   const videoRef = useRef(null);
 
   useEffect(() => {
     if (videoRef.current && stream) {
       videoRef.current.srcObject = stream;
+      const playPromise = videoRef.current.play();
+      if (playPromise !== undefined) {
+        playPromise.catch(err => {
+          console.warn('Autoplay prevented on participant video:', err);
+        });
+      }
     }
   }, [stream]);
 
@@ -1486,7 +1934,7 @@ function ParticipantVideo({ stream, isSpeakerMuted }) {
       autoPlay
       playsInline
       muted={isSpeakerMuted}
-      className="w-full h-full object-cover transform -scale-x-100"
+      className={className}
     />
   );
 }

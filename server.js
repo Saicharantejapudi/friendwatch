@@ -597,15 +597,16 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('update-peer-id', ({ peerId }) => {
-    if (!currentRoomId) return;
-    const room = rooms.get(currentRoomId);
+  socket.on('update-peer-id', ({ peerId, roomId }) => {
+    const targetRoomId = roomId || currentRoomId;
+    if (!targetRoomId) return;
+    const room = rooms.get(targetRoomId);
     if (!room) return;
 
     const participant = room.participants.get(socket.id);
     if (participant) {
       participant.peerId = peerId;
-      socket.to(currentRoomId).emit('peer-id-updated', {
+      socket.to(targetRoomId).emit('peer-id-updated', {
         socketId: socket.id,
         peerId
       });
@@ -717,6 +718,7 @@ io.on('connection', (socket) => {
           socket.to(currentRoomId).emit('user-left', {
             socketId: socket.id,
             peerId: leavingParticipant.peerId,
+            userId: leavingParticipant.userId,
             username: leavingParticipant.username,
             remainingCount: room.participants.size
           });
