@@ -214,14 +214,17 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// Initialize Socket.io Server
+// Initialize Socket.io Server with multi-transport support
 const io = new SocketIOServer(server, {
   cors: {
     origin: '*',
-    methods: ['GET', 'POST']
+    methods: ['GET', 'POST'],
+    credentials: true
   },
-  pingTimeout: 30000,
-  pingInterval: 10000
+  transports: ['polling', 'websocket'],
+  allowEIO3: true,
+  pingTimeout: 60000,
+  pingInterval: 25000
 });
 
 // Mount integrated PeerJS Server

@@ -302,7 +302,34 @@ export default function App() {
   }, [roomState.roomId]);
 
   // ---------------------------------------------------------------------------
-  // 3. SOCKET.IO & PEERJS INITIALIZATION WHEN ENTERING ROOM
+  // 3. PRE-CONNECT SOCKET WHEN LOGGED IN FOR INSTANT ACTIONS
+  // ---------------------------------------------------------------------------
+  useEffect(() => {
+    if (!currentUser || !authToken) return;
+
+    if (!socketRef.current || socketRef.current.disconnected) {
+      const socket = io(SERVER_URL, {
+        auth: { token: authToken },
+        transports: ['polling', 'websocket'],
+        reconnection: true,
+        reconnectionAttempts: 10,
+        reconnectionDelay: 1000,
+        timeout: 30000
+      });
+      socketRef.current = socket;
+
+      socket.on('connect', () => {
+        console.log('[Socket Connected] Connected to server with ID:', socket.id);
+      });
+
+      socket.on('connect_error', (err) => {
+        console.warn('[Socket Connect Error]:', err.message);
+      });
+    }
+  }, [currentUser, authToken]);
+
+  // ---------------------------------------------------------------------------
+  // 4. ENTER ROOM (CREATE AS HOST OR JOIN WITH CODE)
   // ---------------------------------------------------------------------------
   const setupRoomConnection = useCallback(async (roomId, isCreating = false, roomName = '') => {
     if (!currentUser || !authToken) return;
@@ -314,27 +341,25 @@ export default function App() {
     const timeoutTimer = setTimeout(() => {
       setIsLobbyLoading(false);
       setLobbyError('Connection took too long. Please try again.');
-    }, 12000);
+    }, 15000);
 
     try {
       // 1. Initialize user webcam/mic stream in parallel
       const streamPromise = initializeUserMedia();
 
-      // 2. Connect to Socket.io with JWT Auth
-      const socket = io(SERVER_URL, {
-        auth: { token: authToken },
-        transports: ['websocket', 'polling'],
-        timeout: 10000,
-        reconnectionAttempts: 5
-      });
-      socketRef.current = socket;
-
-      socket.on('connect_error', (err) => {
-        clearTimeout(timeoutTimer);
-        console.error('[Socket Error]:', err);
-        setLobbyError('Server connection error: ' + (err.message || 'Could not connect to party server'));
-        setIsLobbyLoading(false);
-      });
+      // 2. Get or initialize Socket.io
+      let socket = socketRef.current;
+      if (!socket || socket.disconnected) {
+        socket = io(SERVER_URL, {
+          auth: { token: authToken },
+          transports: ['polling', 'websocket'],
+          reconnection: true,
+          reconnectionAttempts: 10,
+          reconnectionDelay: 1000,
+          timeout: 30000
+        });
+        socketRef.current = socket;
+      }
 
       // 3. Connect to PeerJS (Local on localhost, Public PeerJS Cloud in production)
       const isLocal = window.location.hostname === 'localhost';
@@ -385,27 +410,7 @@ export default function App() {
         peerConnectionsRef.current[call.peer] = call;
       });
 
-      // 4. Trigger Room Creation or Join immediately without waiting for PeerJS!
-      const stream = await streamPromise;
-
-      if (isCreating) {
-        socket.emit('create-room', { roomName: roomName || `${currentUser.username}'s Party` }, (res) => {
-          clearTimeout(timeoutTimer);
-          if (res.success) {
-            joinRoomWithPeer(socket, peer, stream, res.roomId);
-          } else {
-            setLobbyError(res.error || 'Failed to create room');
-            setIsLobbyLoading(false);
-          }
-        });
-      } else {
-        clearTimeout(timeoutTimer);
-        joinRoomWithPeer(socket, peer, stream, roomId);
-      }
-
-      // -------------------------------------------------------------
-      // SOCKET EVENT LISTENERS
-      // -------------------------------------------------------------
+      // 4. Socket room event handlers
       socket.on('user-joined', ({ participant, participantsCount }) => {
         console.log('[Socket] New participant joined:', participant.username);
         setRoomState(prev => ({
@@ -413,10 +418,11 @@ export default function App() {
           participants: [...prev.participants.filter(p => p.socketId !== participant.socketId), participant]
         }));
 
-        // Call newly joined participant via WebRTC
-        if (participant.peerId && stream && peerRef.current) {
-          connectToNewUser(participant.peerId, stream);
-        }
+        streamPromise.then(stream => {
+          if (participant.peerId && stream && peerRef.current) {
+            connectToNewUser(participant.peerId, stream);
+          }
+        });
       });
 
       socket.on('user-left', ({ socketId, peerId, username }) => {
@@ -487,6 +493,35 @@ export default function App() {
         leaveRoom();
       });
 
+      // 5. Execute action immediately or once connected
+      const executeAction = () => {
+        if (isCreating) {
+          socket.emit('create-room', { roomName: roomName || `${currentUser.username}'s Party` }, (res) => {
+            clearTimeout(timeoutTimer);
+            if (res.success) {
+              joinRoomWithPeer(socket, peer, streamPromise, res.roomId);
+            } else {
+              setLobbyError(res.error || 'Failed to create room');
+              setIsLobbyLoading(false);
+            }
+          });
+        } else {
+          clearTimeout(timeoutTimer);
+          joinRoomWithPeer(socket, peer, streamPromise, roomId);
+        }
+      };
+
+      if (socket.connected) {
+        executeAction();
+      } else {
+        socket.once('connect', executeAction);
+        socket.once('connect_error', (err) => {
+          clearTimeout(timeoutTimer);
+          console.error('[Socket Error]:', err);
+          setLobbyError('Server connection error: ' + (err.message || 'Could not connect to party server'));
+          setIsLobbyLoading(false);
+        });
+      }
     } catch (err) {
       console.error('Failed to initialize room:', err);
       setLobbyError(err.message || 'Connection failed');
