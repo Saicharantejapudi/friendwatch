@@ -1364,121 +1364,16 @@ export default function App() {
         >
           {/* Main Video Stream Container (16:9 Aspect Ratio & Letterboxing) */}
           <div className="flex-1 flex items-center justify-center relative w-full h-full rounded-xl overflow-hidden bg-slate-950 border border-slate-800/60 shadow-2xl">
-            {/* View Switcher Tabs (Shown when BOTH Screen Share and Pinned Person are active) */}
-            {isScreenSharing && pinnedUser && (
-              <div className="absolute top-4 left-1/2 transform -translate-x-1/2 flex items-center p-1 rounded-xl bg-slate-900/90 border border-slate-700/80 shadow-2xl backdrop-blur-md z-30">
-                <button
-                  onClick={() => setMainStageView('screen')}
-                  className={`px-3 py-1 rounded-lg text-xs font-medium transition cursor-pointer flex items-center gap-1.5 ${
-                    mainStageView === 'screen'
-                      ? 'bg-brand-600 text-white shadow'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  <MonitorPlay className="w-3.5 h-3.5" />
-                  <span>Screen Share (Live)</span>
-                </button>
-                <button
-                  onClick={() => setMainStageView('pin')}
-                  className={`px-3 py-1 rounded-lg text-xs font-medium transition cursor-pointer flex items-center gap-1.5 ${
-                    mainStageView !== 'screen'
-                      ? 'bg-brand-600 text-white shadow'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  <Pin className="w-3.5 h-3.5" />
-                  <span>Pinned: {pinnedUser.username}</span>
-                </button>
-              </div>
-            )}
-
-            {/* 1. PINNED PARTICIPANT VIEW */}
-            {pinnedUser && (mainStageView === 'pin' || !isScreenSharing) ? (
-              <div className="relative w-full h-full flex items-center justify-center bg-slate-950">
-                {pinnedUser.isLocal ? (
-                  <>
-                    <video
-                      ref={pinnedLocalVideoRef}
-                      autoPlay
-                      muted
-                      playsInline
-                      className={`w-full h-full object-contain transform -scale-x-100 ${isCameraOff ? 'hidden' : 'block'}`}
-                    />
-                    {isCameraOff && (
-                      <div className="flex flex-col items-center justify-center p-8 text-center">
-                        <div className="w-24 h-24 rounded-3xl bg-brand-600/30 border border-brand-500/40 flex items-center justify-center font-bold text-3xl text-white shadow-2xl mb-4">
-                          {currentUser.username[0]?.toUpperCase()}
-                        </div>
-                        <h4 className="text-lg font-bold text-white mb-1">{currentUser.username} (You)</h4>
-                        <span className="text-xs text-slate-400">Camera is turned off</span>
-                      </div>
-                    )}
-                  </>
-                ) : (
-                  <>
-                    {(() => {
-                      const stream = pinnedUser.peerId ? remoteStreams[pinnedUser.peerId] : null;
-                      const participantInfo = roomState.participants.find(p => p.userId === pinnedUser.userId);
-                      const isCamOff = participantInfo ? participantInfo.isCameraOff : false;
-
-                      if (stream && !isCamOff) {
-                        return (
-                          <ParticipantVideo
-                            stream={stream}
-                            isSpeakerMuted={isSpeakerMuted}
-                            className="w-full h-full object-contain"
-                          />
-                        );
-                      }
-
-                      return (
-                        <div className="flex flex-col items-center justify-center p-8 text-center">
-                          <div className="w-24 h-24 rounded-3xl bg-purple-600/30 border border-purple-500/40 flex items-center justify-center font-bold text-3xl text-white shadow-2xl mb-4">
-                            {pinnedUser.username[0]?.toUpperCase()}
-                          </div>
-                          <h4 className="text-lg font-bold text-white mb-1">{pinnedUser.username}</h4>
-                          <span className="text-xs text-slate-400">
-                            {isCamOff ? 'Camera is turned off' : 'Waiting for video stream...'}
-                          </span>
-                        </div>
-                      );
-                    })()}
-                  </>
-                )}
-
-                {/* Pinned Info Banner & Unpin Button */}
-                <div className="absolute top-4 left-4 flex items-center gap-2 z-20">
-                  <div className="px-3 py-1.5 rounded-lg bg-slate-900/90 border border-brand-500/50 text-brand-300 text-xs font-semibold flex items-center gap-1.5 shadow-xl backdrop-blur-md">
-                    <Pin className="w-3.5 h-3.5 text-brand-400" />
-                    <span>Pinned: {pinnedUser.username}</span>
-                  </div>
-                  <button
-                    onClick={() => {
-                      setPinnedUser(null);
-                      setMainStageView('auto');
-                    }}
-                    className="px-2.5 py-1.5 rounded-lg bg-slate-900/90 hover:bg-slate-800 border border-slate-700 text-slate-300 hover:text-white text-xs font-medium flex items-center gap-1 transition shadow-xl cursor-pointer"
-                    title="Unpin participant"
-                  >
-                    <PinOff className="w-3.5 h-3.5 text-rose-400" />
-                    <span>Unpin</span>
-                  </button>
-                </div>
-              </div>
-            ) : null}
-
-            {/* 2. LIVE HOST SCREEN SHARE VIDEO (Kept mounted for uninterrupted audio playback) */}
+            {/* Live Host Screen Share Video */}
             <video
               ref={screenVideoRef}
               autoPlay
               playsInline
-              className={`w-full h-full object-contain ${
-                isScreenSharing && (!pinnedUser || mainStageView === 'screen') ? 'block' : 'hidden'
-              }`}
+              className={`w-full h-full object-contain ${isScreenSharing ? 'block' : 'hidden'}`}
             />
 
-            {/* 3. CINEMA SCREEN IS IDLE PLACEHOLDER */}
-            {!isScreenSharing && !pinnedUser && (
+            {/* Waiting / Cinema Placeholder when no screen is active */}
+            {!isScreenSharing && (
               <div className="flex flex-col items-center justify-center p-8 text-center max-w-md">
                 <div className="w-20 h-20 rounded-2xl bg-slate-900/90 border border-slate-800 flex items-center justify-center mb-5 shadow-2xl">
                   <MonitorPlay className="w-10 h-10 text-brand-500 animate-pulse-subtle" />
@@ -1487,7 +1382,7 @@ export default function App() {
                 <p className="text-slate-400 text-xs leading-relaxed mb-6">
                   {roomState.isHost
                     ? "You are the Room Host! Click 'Share Screen' below to stream your movie, anime, or video with audio."
-                    : "Waiting for the Room Host to start screen sharing. In the meantime, chat, or pin a friend's video to enlarge!"}
+                    : "Waiting for the Room Host to start screen sharing. In the meantime, chat and hang out in the webcam mesh!"}
                 </p>
 
                 {roomState.isHost ? (
@@ -1508,7 +1403,7 @@ export default function App() {
             )}
 
             {/* Top Overlay Badge inside Video Container */}
-            {isScreenSharing && (!pinnedUser || mainStageView === 'screen') && (
+            {isScreenSharing && (
               <div className="absolute top-4 left-4 flex items-center gap-2 z-10 pointer-events-none">
                 <div className="px-2.5 py-1 rounded-md bg-rose-600/90 text-white text-[11px] font-bold uppercase tracking-wider flex items-center gap-1.5 shadow-lg backdrop-blur-sm">
                   <span className="w-2 h-2 rounded-full bg-white animate-ping" />
@@ -1634,139 +1529,277 @@ export default function App() {
               <div className="flex items-center justify-between mb-2">
                 <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
                   <Users className="w-3.5 h-3.5 text-brand-400" />
-                  Webcam Mesh ({roomState.participants.length}/6)
+                  {pinnedUser ? `Pinned: ${pinnedUser.username}` : `People (${roomState.participants.length}/6)`}
                 </span>
-                <span className="text-[10px] text-emerald-400 font-mono flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                  P2P Active
-                </span>
+                <div className="flex items-center gap-2">
+                  {pinnedUser && (
+                    <button
+                      onClick={() => setPinnedUser(null)}
+                      className="text-[10px] text-rose-400 hover:text-rose-300 font-medium flex items-center gap-1 px-1.5 py-0.5 rounded bg-rose-500/10 border border-rose-500/20 cursor-pointer transition"
+                    >
+                      <PinOff className="w-3 h-3" />
+                      <span>Unpin</span>
+                    </button>
+                  )}
+                  <span className="text-[10px] text-emerald-400 font-mono flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    P2P
+                  </span>
+                </div>
               </div>
 
-              {/* 2x3 Grid Container */}
-              <div className="grid grid-cols-2 gap-2 max-h-56 overflow-y-auto pr-1">
-                {/* 1. Local User Feed */}
-                <div
-                  className={`relative rounded-lg overflow-hidden bg-slate-800 border transition aspect-video flex items-center justify-center group ${
-                    activeSpeakers.has('local')
-                      ? 'border-emerald-500 speaker-ring'
-                      : 'border-slate-700/60'
-                  }`}
-                >
-                  <video
-                    ref={localVideoRef}
-                    autoPlay
-                    muted
-                    playsInline
-                    className={`w-full h-full object-cover transform -scale-x-100 ${
-                      isCameraOff ? 'hidden' : 'block'
-                    }`}
-                  />
-                  {isCameraOff && (
-                    <div className="w-8 h-8 rounded-full bg-brand-600 flex items-center justify-center font-bold text-xs text-white shadow-md">
-                      {currentUser.username[0]?.toUpperCase()}
-                    </div>
-                  )}
-
-                  {/* Pin Button */}
-                  {(() => {
-                    const isLocalPinned = pinnedUser && pinnedUser.userId === currentUser.id;
-                    return (
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleTogglePin({
-                            userId: currentUser.id,
-                            username: currentUser.username,
-                            peerId: peerRef.current?.id,
-                            isLocal: true
-                          });
-                        }}
-                        title={isLocalPinned ? "Unpin yourself" : "Pin yourself to main screen"}
-                        className={`absolute top-1 right-1 p-1 rounded transition backdrop-blur-xs z-10 cursor-pointer ${
-                          isLocalPinned
-                            ? 'bg-brand-600 text-white shadow'
-                            : 'bg-black/60 hover:bg-black/90 text-slate-300 hover:text-white'
-                        }`}
-                      >
-                        {isLocalPinned ? <PinOff className="w-3 h-3 text-rose-300" /> : <Pin className="w-3 h-3" />}
-                      </button>
-                    );
-                  })()}
-
-                  {/* Name Tag & Status Badges */}
-                  <div className="absolute bottom-1 left-1 right-1 flex items-center justify-between px-1.5 py-0.5 rounded bg-black/60 backdrop-blur-xs text-[10px] text-white">
-                    <span className="truncate max-w-[70px]">{currentUser.username} (You)</span>
-                    <div className="flex items-center gap-1">
-                      {roomState.isHost && <Crown className="w-2.5 h-2.5 text-amber-400" />}
-                      {isMicMuted ? (
-                        <MicOff className="w-2.5 h-2.5 text-rose-400" />
-                      ) : (
-                        <Mic className="w-2.5 h-2.5 text-emerald-400" />
-                      )}
-                    </div>
-                  </div>
-                </div>
-
-                {/* 2. Remote Room Participants */}
-                {roomState.participants
-                  .filter(p => p.userId !== currentUser.id)
-                  .map(participant => {
-                    const stream = participant.peerId ? remoteStreams[participant.peerId] : null;
-                    const isSpeaking = participant.peerId && activeSpeakers.has(participant.peerId);
-                    const isPinned = pinnedUser && pinnedUser.userId === participant.userId;
-
-                    return (
-                      <div
-                        key={participant.socketId}
-                        className={`relative rounded-lg overflow-hidden bg-slate-800 border transition aspect-video flex items-center justify-center group ${
-                          isSpeaking ? 'border-emerald-500 speaker-ring' : 'border-slate-700/60'
-                        }`}
-                      >
-                        {stream && !participant.isCameraOff ? (
-                          <ParticipantVideo stream={stream} isSpeakerMuted={isSpeakerMuted} />
-                        ) : (
-                          <div className="w-8 h-8 rounded-full bg-slate-700 flex items-center justify-center font-bold text-xs text-white shadow-md">
-                            {participant.username[0]?.toUpperCase()}
+              {/* 1. PINNED VIEW IN PEOPLE SECTION (PINNED PERSON BIG + MY SMALL VIDEO) */}
+              {pinnedUser ? (
+                <div className="space-y-2">
+                  {/* Big Featured Video Container */}
+                  <div className="relative rounded-xl overflow-hidden bg-slate-900 border border-brand-500/50 aspect-video w-full flex items-center justify-center shadow-xl group">
+                    {pinnedUser.isLocal ? (
+                      <>
+                        <video
+                          ref={localVideoRef}
+                          autoPlay
+                          muted
+                          playsInline
+                          className={`w-full h-full object-cover transform -scale-x-100 ${
+                            isCameraOff ? 'hidden' : 'block'
+                          }`}
+                        />
+                        {isCameraOff && (
+                          <div className="flex flex-col items-center justify-center p-4">
+                            <div className="w-12 h-12 rounded-full bg-brand-600 flex items-center justify-center font-bold text-lg text-white shadow-md mb-2">
+                              {currentUser.username[0]?.toUpperCase()}
+                            </div>
+                            <span className="text-xs text-slate-300 font-semibold">{currentUser.username} (You)</span>
+                            <span className="text-[10px] text-slate-500">Camera is off</span>
                           </div>
                         )}
+                      </>
+                    ) : (
+                      <>
+                        {(() => {
+                          const stream = pinnedUser.peerId ? remoteStreams[pinnedUser.peerId] : null;
+                          const participantInfo = roomState.participants.find(p => p.userId === pinnedUser.userId);
+                          const isCamOff = participantInfo ? participantInfo.isCameraOff : false;
 
-                        {/* Pin Button */}
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleTogglePin({
-                              userId: participant.userId,
-                              username: participant.username,
-                              peerId: participant.peerId,
-                              isLocal: false
-                            });
-                          }}
-                          title={isPinned ? `Unpin ${participant.username}` : `Pin ${participant.username} to main screen`}
-                          className={`absolute top-1 right-1 p-1 rounded transition backdrop-blur-xs z-10 cursor-pointer ${
-                            isPinned
-                              ? 'bg-brand-600 text-white shadow'
-                              : 'bg-black/60 hover:bg-black/90 text-slate-300 hover:text-white'
+                          if (stream && !isCamOff) {
+                            return (
+                              <ParticipantVideo stream={stream} isSpeakerMuted={isSpeakerMuted} />
+                            );
+                          }
+
+                          return (
+                            <div className="flex flex-col items-center justify-center p-4">
+                              <div className="w-12 h-12 rounded-full bg-purple-600 flex items-center justify-center font-bold text-lg text-white shadow-md mb-2">
+                                {pinnedUser.username[0]?.toUpperCase()}
+                              </div>
+                              <span className="text-xs text-slate-300 font-semibold">{pinnedUser.username}</span>
+                              <span className="text-[10px] text-slate-500">
+                                {isCamOff ? 'Camera is turned off' : 'Waiting for video...'}
+                              </span>
+                            </div>
+                          );
+                        })()}
+                      </>
+                    )}
+
+                    {/* Top Left Pinned Badge */}
+                    <div className="absolute top-2 left-2 flex items-center gap-1 px-2 py-0.5 rounded-md bg-black/70 backdrop-blur-xs text-[10px] font-semibold text-brand-300 border border-brand-500/30">
+                      <Pin className="w-3 h-3 text-brand-400" />
+                      <span className="truncate max-w-[110px]">{pinnedUser.username}</span>
+                    </div>
+
+                    {/* Top Right Unpin Button */}
+                    <button
+                      onClick={() => setPinnedUser(null)}
+                      title="Unpin person"
+                      className="absolute top-2 right-2 p-1.5 rounded-md bg-black/70 hover:bg-black/90 text-slate-300 hover:text-rose-400 transition backdrop-blur-xs border border-slate-700/60 cursor-pointer"
+                    >
+                      <PinOff className="w-3.5 h-3.5 text-rose-400" />
+                    </button>
+
+                    {/* Name Tag Bottom-Left */}
+                    <div className="absolute bottom-2 left-2 flex items-center gap-1.5 px-2 py-0.5 rounded bg-black/70 backdrop-blur-xs text-[10px] text-white">
+                      <span className="font-semibold">{pinnedUser.username}</span>
+                      {pinnedUser.userId === currentUser.id && <span className="text-slate-400">(You)</span>}
+                    </div>
+
+                    {/* Small Floating Video of Current User ("my small video") when someone else is pinned */}
+                    {!pinnedUser.isLocal && (
+                      <div className="absolute bottom-2 right-2 w-24 sm:w-28 aspect-video rounded-lg overflow-hidden bg-slate-950 border-2 border-slate-700 shadow-2xl flex items-center justify-center z-10">
+                        <video
+                          ref={localVideoRef}
+                          autoPlay
+                          muted
+                          playsInline
+                          className={`w-full h-full object-cover transform -scale-x-100 ${
+                            isCameraOff ? 'hidden' : 'block'
                           }`}
-                        >
-                          {isPinned ? <PinOff className="w-3 h-3 text-rose-300" /> : <Pin className="w-3 h-3" />}
-                        </button>
-
-                        {/* Name Tag & Status Badges */}
-                        <div className="absolute bottom-1 left-1 right-1 flex items-center justify-between px-1.5 py-0.5 rounded bg-black/60 backdrop-blur-xs text-[10px] text-white">
-                          <span className="truncate max-w-[70px]">{participant.username}</span>
-                          <div className="flex items-center gap-1">
-                            {participant.isHost && <Crown className="w-2.5 h-2.5 text-amber-400" />}
-                            {participant.isMuted ? (
-                              <MicOff className="w-2.5 h-2.5 text-rose-400" />
-                            ) : (
-                              <Mic className="w-2.5 h-2.5 text-emerald-400" />
-                            )}
+                        />
+                        {isCameraOff && (
+                          <div className="w-6 h-6 rounded-full bg-brand-600 flex items-center justify-center font-bold text-[10px] text-white">
+                            {currentUser.username[0]?.toUpperCase()}
                           </div>
+                        )}
+                        <div className="absolute bottom-0.5 left-1 right-1 flex items-center justify-between text-[8px] text-white bg-black/70 px-1 py-0.2 rounded">
+                          <span className="truncate max-w-[50px]">You</span>
+                          {isMicMuted ? (
+                            <MicOff className="w-2 h-2 text-rose-400" />
+                          ) : (
+                            <Mic className="w-2 h-2 text-emerald-400" />
+                          )}
                         </div>
                       </div>
-                    );
-                  })}
-              </div>
+                    )}
+                  </div>
+
+                  {/* Compact thumbnails for any other friends in room */}
+                  {roomState.participants.filter(p => p.userId !== currentUser.id && p.userId !== pinnedUser.userId).length > 0 && (
+                    <div className="flex items-center gap-1.5 overflow-x-auto py-1">
+                      {roomState.participants
+                        .filter(p => p.userId !== currentUser.id && p.userId !== pinnedUser.userId)
+                        .map(participant => {
+                          const stream = participant.peerId ? remoteStreams[participant.peerId] : null;
+                          return (
+                            <div
+                              key={participant.socketId}
+                              onClick={() => handleTogglePin({
+                                userId: participant.userId,
+                                username: participant.username,
+                                peerId: participant.peerId,
+                                isLocal: false
+                              })}
+                              title={`Click to pin ${participant.username}`}
+                              className="w-20 aspect-video rounded-md overflow-hidden bg-slate-800 border border-slate-700/80 flex-shrink-0 relative cursor-pointer hover:border-brand-500 transition flex items-center justify-center"
+                            >
+                              {stream && !participant.isCameraOff ? (
+                                <ParticipantVideo stream={stream} isSpeakerMuted={isSpeakerMuted} />
+                              ) : (
+                                <div className="w-6 h-6 rounded-full bg-slate-700 flex items-center justify-center text-[10px] font-bold text-white">
+                                  {participant.username[0]?.toUpperCase()}
+                                </div>
+                              )}
+                              <div className="absolute bottom-0.5 left-0.5 right-0.5 px-1 bg-black/70 text-[8px] text-white truncate rounded">
+                                {participant.username}
+                              </div>
+                            </div>
+                          );
+                        })}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                /* 2. STANDARD 2x3 GRID CONTAINER (WHEN NO ONE IS PINNED) */
+                <div className="grid grid-cols-2 gap-2 max-h-56 overflow-y-auto pr-1">
+                  {/* 1. Local User Feed */}
+                  <div
+                    className={`relative rounded-lg overflow-hidden bg-slate-800 border transition aspect-video flex items-center justify-center group ${
+                      activeSpeakers.has('local')
+                        ? 'border-emerald-500 speaker-ring'
+                        : 'border-slate-700/60'
+                    }`}
+                  >
+                    <video
+                      ref={localVideoRef}
+                      autoPlay
+                      muted
+                      playsInline
+                      className={`w-full h-full object-cover transform -scale-x-100 ${
+                        isCameraOff ? 'hidden' : 'block'
+                      }`}
+                    />
+                    {isCameraOff && (
+                      <div className="w-8 h-8 rounded-full bg-brand-600 flex items-center justify-center font-bold text-xs text-white shadow-md">
+                        {currentUser.username[0]?.toUpperCase()}
+                      </div>
+                    )}
+
+                    {/* Pin Button */}
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleTogglePin({
+                          userId: currentUser.id,
+                          username: currentUser.username,
+                          peerId: peerRef.current?.id,
+                          isLocal: true
+                        });
+                      }}
+                      title="Pin yourself"
+                      className="absolute top-1 right-1 p-1 rounded bg-black/60 hover:bg-black/90 text-slate-300 hover:text-white transition backdrop-blur-xs z-10 cursor-pointer"
+                    >
+                      <Pin className="w-3 h-3" />
+                    </button>
+
+                    {/* Name Tag & Status Badges */}
+                    <div className="absolute bottom-1 left-1 right-1 flex items-center justify-between px-1.5 py-0.5 rounded bg-black/60 backdrop-blur-xs text-[10px] text-white">
+                      <span className="truncate max-w-[70px]">{currentUser.username} (You)</span>
+                      <div className="flex items-center gap-1">
+                        {roomState.isHost && <Crown className="w-2.5 h-2.5 text-amber-400" />}
+                        {isMicMuted ? (
+                          <MicOff className="w-2.5 h-2.5 text-rose-400" />
+                        ) : (
+                          <Mic className="w-2.5 h-2.5 text-emerald-400" />
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* 2. Remote Room Participants */}
+                  {roomState.participants
+                    .filter(p => p.userId !== currentUser.id)
+                    .map(participant => {
+                      const stream = participant.peerId ? remoteStreams[participant.peerId] : null;
+                      const isSpeaking = participant.peerId && activeSpeakers.has(participant.peerId);
+
+                      return (
+                        <div
+                          key={participant.socketId}
+                          className={`relative rounded-lg overflow-hidden bg-slate-800 border transition aspect-video flex items-center justify-center group ${
+                            isSpeaking ? 'border-emerald-500 speaker-ring' : 'border-slate-700/60'
+                          }`}
+                        >
+                          {stream && !participant.isCameraOff ? (
+                            <ParticipantVideo stream={stream} isSpeakerMuted={isSpeakerMuted} />
+                          ) : (
+                            <div className="w-8 h-8 rounded-full bg-slate-700 flex items-center justify-center font-bold text-xs text-white shadow-md">
+                              {participant.username[0]?.toUpperCase()}
+                            </div>
+                          )}
+
+                          {/* Pin Button */}
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleTogglePin({
+                                userId: participant.userId,
+                                username: participant.username,
+                                peerId: participant.peerId,
+                                isLocal: false
+                              });
+                            }}
+                            title={`Pin ${participant.username}`}
+                            className="absolute top-1 right-1 p-1 rounded bg-black/60 hover:bg-black/90 text-slate-300 hover:text-white transition backdrop-blur-xs z-10 cursor-pointer"
+                          >
+                            <Pin className="w-3 h-3" />
+                          </button>
+
+                          {/* Name Tag & Status Badges */}
+                          <div className="absolute bottom-1 left-1 right-1 flex items-center justify-between px-1.5 py-0.5 rounded bg-black/60 backdrop-blur-xs text-[10px] text-white">
+                            <span className="truncate max-w-[70px]">{participant.username}</span>
+                            <div className="flex items-center gap-1">
+                              {participant.isHost && <Crown className="w-2.5 h-2.5 text-amber-400" />}
+                              {participant.isMuted ? (
+                                <MicOff className="w-2.5 h-2.5 text-rose-400" />
+                              ) : (
+                                <Mic className="w-2.5 h-2.5 text-emerald-400" />
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                </div>
+              )}
 
               {/* Dedicated Personal Media Controls Bar (Sidebar Dock - never obstructed by Chrome's bottom banner) */}
               <div className="mt-2.5 pt-2 border-t border-slate-800/80 flex items-center justify-between px-1">
