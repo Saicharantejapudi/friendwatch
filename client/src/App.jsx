@@ -953,8 +953,7 @@ export default function App() {
         audio: {
           echoCancellation: false,
           noiseSuppression: false,
-          autoGainControl: false,
-          suppressLocalAudioPlayback: false
+          autoGainControl: false
         },
         systemAudio: 'include',
         selfBrowserSurface: 'exclude',
@@ -986,8 +985,10 @@ export default function App() {
       setIsScreenSharing(true);
 
       if (screenVideoRef.current) {
-        screenVideoRef.current.srcObject = displayStream;
-        screenVideoRef.current.muted = true; // Host must NOT hear own capture to prevent delayed feedback loop
+        // Strip audio tracks completely from host local preview video to prevent any comb filtering / double audio
+        const videoOnlyStream = new MediaStream(displayStream.getVideoTracks());
+        screenVideoRef.current.srcObject = videoOnlyStream;
+        screenVideoRef.current.muted = true;
         screenVideoRef.current.play().catch(e => console.warn('Screen play error:', e));
       }
 
