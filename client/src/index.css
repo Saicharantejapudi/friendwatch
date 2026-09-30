@@ -1,0 +1,64 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-[#0b0f19] text-slate-100 antialiased font-sans selection:bg-brand-500 selection:text-white min-h-screen overflow-x-hidden;
+  }
+}
+
+/* Custom Sleek Scrollbar (Discord/Twitch inspired) */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.6);
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(71, 85, 105, 0.5);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(99, 102, 241, 0.8);
+}
+
+/* Glassmorphism Classes */
+.glass-panel {
+  background: rgba(15, 23, 42, 0.82);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.glass-card {
+  background: rgba(30, 41, 59, 0.7);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/* Active Speaker Ring */
+.speaker-ring {
+  box-shadow: 0 0 0 2px #10b981, 0 0 16px rgba(16, 185, 129, 0.6);
+}
+
+/* Screen Share Player Letterbox & Fit */
+.video-player-container {
+  aspect-ratio: 16 / 9;
+  background-color: #000000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  position: relative;
+}
+
+.video-player-container video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
