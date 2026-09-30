@@ -3,7 +3,8 @@
  * Built with Node.js, Express, Socket.io, PeerJS Server, and JWT Authentication.
  * 
  * Features:
- * - Persistent User Registration & Login with bcrypt and JWT
+ * - Hybrid Database Support: Cloud MongoDB Atlas with automatic Local JSON fallback
+ * - User Registration & Login with bcrypt and JWT
  * - Room Management with strictly enforced 6-participant limit
  * - Role-Based Access Control: Room Host vs Audience permissions
  * - WebRTC & PeerJS integrated signaling mesh
@@ -19,6 +20,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
+import mongoose from 'mongoose';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -29,11 +31,27 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const PORT = process.env.PORT || 5000;
-const PEER_PORT = process.env.PEER_PORT || 5001;
 const JWT_SECRET = process.env.JWT_SECRET || 'friendwatch_ultra_secure_jwt_secret_2026';
 const MAX_PARTICIPANTS_PER_ROOM = 6;
+const MONGO_URI = process.env.MONGO_URI || '';
 
-// Ensure persistent storage directory exists
+// -------------------------------------------------------------
+// 1. DATABASE LAYER (MONGODB ATLAS + LOCAL JSON FALLBACK)
+// -------------------------------------------------------------
+let isMongoConnected = false;
+
+// Mongoose User Schema for Cloud MongoDB Atlas
+const userSchema = new mongoose.Schema({
+  customId: { type: String, unique: true, required: true },
+  username: { type: String, unique: true, required: true, trim: true },
+  email: { type: String, unique: true, required: true, lowercase: true, trim: true },
+  passwordHash: { type: String, required: true },
+  createdAt: { type: Date, default: Date.now }
+});
+
+const UserModel = mongoose.models.User || mongoose.model('User', userSchema);
+
+// Local JSON File Storage Fallback
 const DATA_DIR = path.join(__dirname, 'data');
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
 
@@ -45,35 +63,150 @@ if (!fs.existsSync(USERS_FILE)) {
   fs.writeFileSync(USERS_FILE, JSON.stringify([]), 'utf-8');
 }
 
-/**
- * Helper to read persistent users list
- */
-function readUsers() {
+function readLocalUsers() {
   try {
     const content = fs.readFileSync(USERS_FILE, 'utf-8');
     return JSON.parse(content || '[]');
   } catch (err) {
-    console.error('Error reading users file:', err);
+    console.error('Error reading local users file:', err);
     return [];
   }
 }
 
-/**
- * Helper to write persistent users list
- */
-function writeUsers(users) {
+function writeLocalUsers(users) {
   try {
     fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2), 'utf-8');
   } catch (err) {
-    console.error('Error writing users file:', err);
+    console.error('Error writing local users file:', err);
   }
 }
 
-// Initialize Express App and HTTP Server
+/**
+ * Initialize Database Connection
+ */
+async function initializeDatabase() {
+  if (MONGO_URI) {
+    try {
+      console.log('🍃 Connecting to Cloud MongoDB Atlas...');
+      await mongoose.connect(MONGO_URI);
+      isMongoConnected = true;
+      console.log('✅ Connected to MongoDB Atlas Cloud Database successfully!');
+    } catch (err) {
+      console.warn('⚠️ Could not connect to MongoDB Atlas. Falling back to local storage (data/users.json). Error:', err.message);
+      isMongoConnected = false;
+    }
+  } else {
+    console.log('ℹ️ No MONGO_URI provided in .env. Using local persistent storage: data/users.json');
+  }
+}
+
+initializeDatabase();
+
+/**
+ * Database Abstraction Methods
+ */
+async function dbFindUserByEmailOrUsername(emailOrUsername) {
+  const target = emailOrUsername.toLowerCase().trim();
+
+  if (isMongoConnected) {
+    const user = await UserModel.findOne({
+      $or: [
+        { email: target },
+        { username: { $regex: new RegExp(`^${target}$`, 'i') } }
+      ]
+    }).lean();
+
+    if (user) {
+      return {
+        id: user.customId || user._id.toString(),
+        username: user.username,
+        email: user.email,
+        passwordHash: user.passwordHash,
+        createdAt: user.createdAt
+      };
+    }
+    return null;
+  }
+
+  // Local JSON fallback
+  const users = readLocalUsers();
+  const user = users.find(
+    u => u.email.toLowerCase() === target || u.username.toLowerCase() === target
+  );
+  return user || null;
+}
+
+async function dbFindUserById(userId) {
+  if (isMongoConnected) {
+    const user = await UserModel.findOne({
+      $or: [{ customId: userId }, { _id: mongoose.isValidObjectId(userId) ? userId : null }]
+    }).lean();
+
+    if (user) {
+      return {
+        id: user.customId || user._id.toString(),
+        username: user.username,
+        email: user.email,
+        createdAt: user.createdAt
+      };
+    }
+    return null;
+  }
+
+  const users = readLocalUsers();
+  const user = users.find(u => u.id === userId);
+  return user || null;
+}
+
+async function dbCreateUser({ username, email, passwordHash }) {
+  const customId = 'usr_' + Math.random().toString(36).substring(2, 9) + Date.now().toString(36);
+  const normalizedEmail = email.toLowerCase().trim();
+  const normalizedUsername = username.trim();
+
+  if (isMongoConnected) {
+    const newUser = await UserModel.create({
+      customId,
+      username: normalizedUsername,
+      email: normalizedEmail,
+      passwordHash,
+      createdAt: new Date()
+    });
+
+    return {
+      id: newUser.customId,
+      username: newUser.username,
+      email: newUser.email,
+      createdAt: newUser.createdAt
+    };
+  }
+
+  // Local JSON fallback
+  const users = readLocalUsers();
+  const newUser = {
+    id: customId,
+    username: normalizedUsername,
+    email: normalizedEmail,
+    passwordHash,
+    createdAt: new Date().toISOString()
+  };
+
+  users.push(newUser);
+  writeLocalUsers(users);
+
+  return {
+    id: newUser.id,
+    username: newUser.username,
+    email: newUser.email,
+    createdAt: newUser.createdAt
+  };
+}
+
+// -------------------------------------------------------------
+// 2. EXPRESS & SOCKET.IO SETUP
+// -------------------------------------------------------------
 const app = express();
 const server = http.createServer(app);
 
-// CORS configuration for REST API and WebSockets
 app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
@@ -81,7 +214,7 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// Initialize Socket.io Server with WebSocket fallback
+// Initialize Socket.io Server
 const io = new SocketIOServer(server, {
   cors: {
     origin: '*',
@@ -106,24 +239,11 @@ peerServer.on('disconnect', (client) => {
   console.log(`[PeerJS] Client disconnected with Peer ID: ${client.getId()}`);
 });
 
-// -------------------------------------------------------------
-// IN-MEMORY ACTIVE ROOM STATE
-// -------------------------------------------------------------
-// Structure:
-// rooms[roomId] = {
-//   roomId: string,
-//   roomName: string,
-//   hostId: string (userId),
-//   hostSocketId: string,
-//   isScreenSharing: boolean,
-//   screenSharingPeerId: string | null,
-//   participants: Map<socketId, { socketId, userId, username, peerId, isHost, isMuted, isCameraOff }>
-//   createdAt: string
-// }
+// In-Memory Room Map
 const rooms = new Map();
 
 /**
- * Authentication Middleware for REST Endpoints
+ * JWT Authentication Middleware
  */
 function authenticateToken(req, res, next) {
   const authHeader = req.headers['authorization'];
@@ -143,12 +263,11 @@ function authenticateToken(req, res, next) {
 }
 
 // -------------------------------------------------------------
-// AUTHENTICATION REST API ROUTES
+// 3. AUTHENTICATION REST API ROUTES
 // -------------------------------------------------------------
 
 /**
  * POST /api/auth/register
- * Body: { username, email, password }
  */
 app.post('/api/auth/register', async (req, res) => {
   try {
@@ -162,31 +281,20 @@ app.post('/api/auth/register', async (req, res) => {
       return res.status(400).json({ error: 'Password must be at least 6 characters' });
     }
 
-    const users = readUsers();
-    const normalizedEmail = email.toLowerCase().trim();
-    const normalizedUsername = username.trim();
-
-    const existingUser = users.find(
-      u => u.email.toLowerCase() === normalizedEmail || u.username.toLowerCase() === normalizedUsername.toLowerCase()
-    );
-
+    const existingUser = await dbFindUserByEmailOrUsername(email);
     if (existingUser) {
       return res.status(409).json({ error: 'User with that email or username already exists' });
+    }
+
+    const existingUsername = await dbFindUserByEmailOrUsername(username);
+    if (existingUsername) {
+      return res.status(409).json({ error: 'User with that username already exists' });
     }
 
     const salt = await bcrypt.genSalt(10);
     const passwordHash = await bcrypt.hash(password, salt);
 
-    const newUser = {
-      id: 'usr_' + Math.random().toString(36).substring(2, 9) + Date.now().toString(36),
-      username: normalizedUsername,
-      email: normalizedEmail,
-      passwordHash,
-      createdAt: new Date().toISOString()
-    };
-
-    users.push(newUser);
-    writeUsers(users);
+    const newUser = await dbCreateUser({ username, email, passwordHash });
 
     const token = jwt.sign(
       { id: newUser.id, username: newUser.username, email: newUser.email },
@@ -196,12 +304,7 @@ app.post('/api/auth/register', async (req, res) => {
 
     return res.status(201).json({
       message: 'Registration successful',
-      user: {
-        id: newUser.id,
-        username: newUser.username,
-        email: newUser.email,
-        createdAt: newUser.createdAt
-      },
+      user: newUser,
       token
     });
   } catch (err) {
@@ -212,7 +315,6 @@ app.post('/api/auth/register', async (req, res) => {
 
 /**
  * POST /api/auth/login
- * Body: { emailOrUsername, password }
  */
 app.post('/api/auth/login', async (req, res) => {
   try {
@@ -222,13 +324,7 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(400).json({ error: 'Email/Username and password are required' });
     }
 
-    const users = readUsers();
-    const target = emailOrUsername.toLowerCase().trim();
-
-    const user = users.find(
-      u => u.email.toLowerCase() === target || u.username.toLowerCase() === target
-    );
-
+    const user = await dbFindUserByEmailOrUsername(emailOrUsername);
     if (!user) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
@@ -262,28 +358,30 @@ app.post('/api/auth/login', async (req, res) => {
 
 /**
  * GET /api/auth/me
- * Validate current user session
  */
-app.get('/api/auth/me', authenticateToken, (req, res) => {
-  const users = readUsers();
-  const user = users.find(u => u.id === req.user.id);
-  if (!user) {
-    return res.status(404).json({ error: 'User not found' });
-  }
-
-  return res.json({
-    user: {
-      id: user.id,
-      username: user.username,
-      email: user.email,
-      createdAt: user.createdAt
+app.get('/api/auth/me', authenticateToken, async (req, res) => {
+  try {
+    const user = await dbFindUserById(req.user.id);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
     }
-  });
+
+    return res.json({
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        createdAt: user.createdAt
+      }
+    });
+  } catch (err) {
+    console.error('Session validation error:', err);
+    return res.status(500).json({ error: 'Failed to validate session' });
+  }
 });
 
 /**
  * GET /api/rooms/:roomId
- * Check room status and current participant count
  */
 app.get('/api/rooms/:roomId', authenticateToken, (req, res) => {
   const { roomId } = req.params;
@@ -306,10 +404,9 @@ app.get('/api/rooms/:roomId', authenticateToken, (req, res) => {
 });
 
 // -------------------------------------------------------------
-// SOCKET.IO REAL-TIME SIGNALING & ROOM MANAGEMENT
+// 4. SOCKET.IO REAL-TIME SIGNALING & ROOM MANAGEMENT
 // -------------------------------------------------------------
 
-// Authenticate socket connections using JWT token
 io.use((socket, next) => {
   const token = socket.handshake.auth?.token || socket.handshake.headers?.token;
   if (!token) {
@@ -320,7 +417,7 @@ io.use((socket, next) => {
     if (err) {
       return next(new Error('Authentication error: Invalid token'));
     }
-    socket.user = decoded; // { id, username, email }
+    socket.user = decoded;
     next();
   });
 });
@@ -330,14 +427,8 @@ io.on('connection', (socket) => {
 
   let currentRoomId = null;
 
-  /**
-   * Event: create-room
-   * Payload: { roomName }
-   * Creates a new watch party room with the user as Host
-   */
   socket.on('create-room', ({ roomName }, callback) => {
     try {
-      // Generate clean 6-character room code (e.g., 'FW-7X9A')
       const code = 'FW-' + Math.random().toString(36).substring(2, 6).toUpperCase();
       const roomId = code;
 
@@ -367,11 +458,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  /**
-   * Event: join-room
-   * Payload: { roomId, peerId }
-   * Enforces strict 6-participant limit and registers peer
-   */
   socket.on('join-room', ({ roomId, peerId }, callback) => {
     try {
       const room = rooms.get(roomId);
@@ -383,7 +469,6 @@ io.on('connection', (socket) => {
         return socket.emit('error', { message: 'Room does not exist' });
       }
 
-      // Check max participants constraint
       if (room.participants.size >= MAX_PARTICIPANTS_PER_ROOM && !room.participants.has(socket.id)) {
         console.warn(`[Room Full] User ${socket.user.username} rejected from room ${roomId} (Max ${MAX_PARTICIPANTS_PER_ROOM})`);
         if (typeof callback === 'function') {
@@ -418,7 +503,6 @@ io.on('connection', (socket) => {
 
       console.log(`[User Joined] ${socket.user.username} (${isHost ? 'HOST' : 'AUDIENCE'}) joined ${roomId} with PeerID: ${peerId}`);
 
-      // Send initial room state to joining participant
       const existingParticipants = Array.from(room.participants.values());
       
       if (typeof callback === 'function') {
@@ -433,13 +517,11 @@ io.on('connection', (socket) => {
         });
       }
 
-      // Broadcast to other room members that a new participant joined
       socket.to(roomId).emit('user-joined', {
         participant: participantInfo,
         participantsCount: room.participants.size
       });
 
-      // System chat announcement
       io.to(roomId).emit('chat-message', {
         id: 'sys_' + Date.now(),
         isSystem: true,
@@ -447,7 +529,6 @@ io.on('connection', (socket) => {
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
       });
 
-      // If room is already actively sharing screen, let the new user know
       if (room.isScreenSharing && room.screenSharingPeerId) {
         socket.emit('screen-share-active', {
           hostUsername: room.hostUsername,
@@ -463,10 +544,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  /**
-   * Event: update-peer-id
-   * Update or sync PeerJS ID once generated on client
-   */
   socket.on('update-peer-id', ({ peerId }) => {
     if (!currentRoomId) return;
     const room = rooms.get(currentRoomId);
@@ -482,16 +559,11 @@ io.on('connection', (socket) => {
     }
   });
 
-  /**
-   * Event: start-screen-share
-   * Strict Access Control: Only Room Host can trigger screen share
-   */
   socket.on('start-screen-share', ({ screenPeerId }, callback) => {
     if (!currentRoomId) return;
     const room = rooms.get(currentRoomId);
     if (!room) return;
 
-    // Verify host permission
     if (room.hostId !== socket.user.id) {
       console.warn(`[Permission Denied] Non-host ${socket.user.username} attempted to start screen share`);
       if (typeof callback === 'function') {
@@ -505,13 +577,11 @@ io.on('connection', (socket) => {
 
     console.log(`[Screen Share Started] Host ${socket.user.username} in room ${currentRoomId} (Peer: ${screenPeerId})`);
 
-    // Broadcast to room that screen sharing is now live
     socket.to(currentRoomId).emit('screen-share-active', {
       hostUsername: socket.user.username,
       peerId: screenPeerId
     });
 
-    // System announcement
     io.to(currentRoomId).emit('chat-message', {
       id: 'sys_' + Date.now(),
       isSystem: true,
@@ -524,10 +594,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  /**
-   * Event: stop-screen-share
-   * Host stops sharing screen
-   */
   socket.on('stop-screen-share', () => {
     if (!currentRoomId) return;
     const room = rooms.get(currentRoomId);
@@ -550,10 +616,6 @@ io.on('connection', (socket) => {
     });
   });
 
-  /**
-   * Event: media-status-change
-   * Broadcast microphone mute/unmute or video on/off toggle
-   */
   socket.on('media-status-change', ({ isMuted, isCameraOff }) => {
     if (!currentRoomId) return;
     const room = rooms.get(currentRoomId);
@@ -572,10 +634,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  /**
-   * Event: send-chat-message
-   * Real-time text chat message broadcast
-   */
   socket.on('send-chat-message', ({ text }) => {
     if (!currentRoomId || !text || !text.trim()) return;
     const room = rooms.get(currentRoomId);
@@ -593,9 +651,6 @@ io.on('connection', (socket) => {
     io.to(currentRoomId).emit('chat-message', message);
   });
 
-  /**
-   * Handle Disconnect and Cleanup
-   */
   socket.on('disconnect', () => {
     console.log(`[Socket] User disconnected: ${socket.user?.username} (${socket.id})`);
 
@@ -606,7 +661,6 @@ io.on('connection', (socket) => {
         room.participants.delete(socket.id);
 
         if (leavingParticipant) {
-          // Notify other participants of user departure
           socket.to(currentRoomId).emit('user-left', {
             socketId: socket.id,
             peerId: leavingParticipant.peerId,
@@ -622,7 +676,6 @@ io.on('connection', (socket) => {
           });
         }
 
-        // If host left, stop screen sharing and optionally elect new host or close room
         if (room.hostSocketId === socket.id) {
           if (room.isScreenSharing) {
             room.isScreenSharing = false;
@@ -631,7 +684,6 @@ io.on('connection', (socket) => {
           }
 
           if (room.participants.size > 0) {
-            // Elect the first remaining participant as the new host
             const [newHostSocketId, newHostInfo] = room.participants.entries().next().value;
             room.hostId = newHostInfo.userId;
             room.hostUsername = newHostInfo.username;
@@ -651,7 +703,6 @@ io.on('connection', (socket) => {
               timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
             });
           } else {
-            // Empty room cleanup
             rooms.delete(currentRoomId);
             console.log(`[Room Destroyed] Room ${currentRoomId} is now empty and cleaned up.`);
           }
@@ -664,10 +715,11 @@ io.on('connection', (socket) => {
   });
 });
 
-// Basic Health Check Endpoint
+// Health check endpoint with database indicator
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
+    database: isMongoConnected ? 'mongodb-atlas' : 'local-json-storage',
     uptime: process.uptime(),
     activeRooms: rooms.size,
     timestamp: new Date().toISOString()
@@ -689,5 +741,6 @@ server.listen(PORT, () => {
   console.log(`🚀 FriendWatch Server running on http://localhost:${PORT}`);
   console.log(`📡 PeerJS signaling server mounted at /peerjs`);
   console.log(`👥 Max participants per room: ${MAX_PARTICIPANTS_PER_ROOM}`);
+  console.log(`💾 Database Mode: ${isMongoConnected ? 'MongoDB Atlas (Cloud)' : 'Local Persistent Storage (data/users.json)'}`);
   console.log(`=======================================================`);
 });
