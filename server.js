@@ -24,6 +24,7 @@ import mongoose from 'mongoose';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import crypto from 'crypto';
 
 dotenv.config();
 
@@ -31,8 +32,30 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const PORT = process.env.PORT || 5000;
-const JWT_SECRET = process.env.JWT_SECRET || 'friendwatch_ultra_secure_jwt_secret_2026';
-const MAX_PARTICIPANTS_PER_ROOM = 6;
+
+// High-security fallback: generate cryptographically random 256-bit key if JWT_SECRET is not configured
+let JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  console.warn('⚠️ WARNING: No JWT_SECRET found in environment. Generating a secure ephemeral 256-bit runtime key.');
+  JWT_SECRET = crypto.randomBytes(32).toString('hex');
+}
+
+const DEFAULT_MAX_PARTICIPANTS = 6;
+const ABSOLUTE_MAX_PARTICIPANTS = 6;
+const MIN_PARTICIPANTS = 2;
+
+// Clean 32-character unambiguous alphabet (no 0/O, no 1/I)
+const CLEAN_ROOM_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+
+function generateSecureRoomCode() {
+  const bytes = crypto.randomBytes(6);
+  let code = '';
+  for (let i = 0; i < 6; i++) {
+    code += CLEAN_ROOM_CHARS[bytes[i] % CLEAN_ROOM_CHARS.length];
+  }
+  return `FW-${code}`;
+}
+
 const MONGO_URI = process.env.MONGO_URI || '';
 
 // -------------------------------------------------------------
@@ -445,12 +468,14 @@ app.get('/api/rooms/:roomId', authenticateToken, (req, res) => {
   }
 
   const participantCount = room.participants.size;
+  const max = room.maxParticipants || DEFAULT_MAX_PARTICIPANTS;
   return res.json({
     roomId: room.roomId,
     roomName: room.roomName,
     participantCount,
-    maxParticipants: MAX_PARTICIPANTS_PER_ROOM,
-    isFull: participantCount >= MAX_PARTICIPANTS_PER_ROOM,
+    maxParticipants: max,
+    isFull: participantCount >= max,
+    isLocked: !!room.isLocked,
     hostUsername: room.hostUsername,
     isScreenSharing: room.isScreenSharing
   });
@@ -480,10 +505,13 @@ io.on('connection', (socket) => {
 
   let currentRoomId = null;
 
-  socket.on('create-room', ({ roomName }, callback) => {
+  socket.on('create-room', ({ roomName, maxParticipants }, callback) => {
     try {
-      const code = 'FW-' + Math.random().toString(36).substring(2, 6).toUpperCase();
-      const roomId = code;
+      const roomId = generateSecureRoomCode();
+      const parsedMax = parseInt(maxParticipants, 10);
+      const capacity = (!isNaN(parsedMax) && parsedMax >= MIN_PARTICIPANTS && parsedMax <= ABSOLUTE_MAX_PARTICIPANTS)
+        ? parsedMax
+        : DEFAULT_MAX_PARTICIPANTS;
 
       const newRoom = {
         roomId,
@@ -494,14 +522,17 @@ io.on('connection', (socket) => {
         isScreenSharing: false,
         screenSharingPeerId: null,
         participants: new Map(),
+        pendingRequests: new Map(),
+        maxParticipants: capacity,
+        isLocked: false,
         createdAt: new Date().toISOString()
       };
 
       rooms.set(roomId, newRoom);
-      console.log(`[Room Created] Room ID: ${roomId} by Host: ${socket.user.username}`);
+      console.log(`[Room Created] Room ID: ${roomId} (Capacity: ${capacity}) by Host: ${socket.user.username}`);
 
       if (typeof callback === 'function') {
-        callback({ success: true, roomId, roomName: newRoom.roomName });
+        callback({ success: true, roomId, roomName: newRoom.roomName, maxParticipants: capacity });
       }
     } catch (err) {
       console.error('Error creating room:', err);
@@ -522,21 +553,75 @@ io.on('connection', (socket) => {
         return socket.emit('error', { message: 'Room does not exist' });
       }
 
-      if (room.participants.size >= MAX_PARTICIPANTS_PER_ROOM && !room.participants.has(socket.id)) {
-        console.warn(`[Room Full] User ${socket.user.username} rejected from room ${roomId} (Max ${MAX_PARTICIPANTS_PER_ROOM})`);
+      const isHost = (room.hostId === socket.user.id);
+      const max = room.maxParticipants || DEFAULT_MAX_PARTICIPANTS;
+
+      // 1. Security Check: Locked room
+      if (room.isLocked && !isHost && !room.participants.has(socket.id)) {
         if (typeof callback === 'function') {
           return callback({
             success: false,
-            error: `Room is at maximum capacity (${MAX_PARTICIPANTS_PER_ROOM} participants allowed)`
+            error: 'This party has been locked by the host.'
           });
         }
-        return socket.emit('error', { message: 'Room is full' });
+        return socket.emit('error', { message: 'This party has been locked by the host.' });
       }
 
+      // 2. Capacity Check: Maximum participants
+      if (room.participants.size >= max && !room.participants.has(socket.id)) {
+        console.warn(`[Room Full] User ${socket.user.username} rejected from room ${roomId} (Max ${max})`);
+        if (typeof callback === 'function') {
+          return callback({
+            success: false,
+            error: `Room is at maximum capacity (${max} participants allowed)`
+          });
+        }
+        return socket.emit('error', { message: `Room is at maximum capacity (${max} participants allowed)` });
+      }
+
+      // 3. WAITING ROOM / HOST KNOCKING APPROVAL:
+      // First 2 members (Host + 1st Friend, i.e. participants.size < 2 or isHost) enter directly without objection!
+      // From 3rd member onwards (participants.size >= 2 and not host), host acceptance is strictly required.
+      if (!isHost && !room.participants.has(socket.id) && room.participants.size >= 2) {
+        console.log(`[Knock / Waiting Room] User ${socket.user.username} is knocking on room ${roomId} (Current count: ${room.participants.size})`);
+
+        currentRoomId = roomId;
+        room.pendingRequests.set(socket.id, {
+          socketId: socket.id,
+          userId: socket.user.id,
+          username: socket.user.username,
+          peerId: peerId || null,
+          socket,
+          requestedAt: new Date().toISOString()
+        });
+
+        // Prompt the host in real-time
+        if (room.hostSocketId) {
+          io.to(room.hostSocketId).emit('join-request-received', {
+            requestId: socket.id,
+            userId: socket.user.id,
+            username: socket.user.username,
+            roomId: room.roomId
+          });
+        }
+
+        if (typeof callback === 'function') {
+          return callback({
+            success: true,
+            status: 'waiting_approval',
+            roomId,
+            roomName: room.roomName,
+            hostUsername: room.hostUsername,
+            maxParticipants: max
+          });
+        }
+        return;
+      }
+
+      // 4. Direct Entry (Host or 2nd member)
       currentRoomId = roomId;
       socket.join(roomId);
 
-      const isHost = (room.hostId === socket.user.id);
       if (isHost) {
         room.hostSocketId = socket.id;
       }
@@ -561,9 +646,12 @@ io.on('connection', (socket) => {
       if (typeof callback === 'function') {
         callback({
           success: true,
+          status: 'admitted',
           roomId,
           roomName: room.roomName,
           isHost,
+          maxParticipants: max,
+          isLocked: !!room.isLocked,
           isScreenSharing: room.isScreenSharing,
           screenSharingPeerId: room.screenSharingPeerId,
           participants: existingParticipants
@@ -595,6 +683,187 @@ io.on('connection', (socket) => {
         callback({ success: false, error: 'Could not join room' });
       }
     }
+  });
+
+  // Host accepts or rejects pending applicant from waiting room
+  socket.on('respond-join-request', ({ requestId, approved }, callback) => {
+    if (!currentRoomId) return;
+    const room = rooms.get(currentRoomId);
+    if (!room) return;
+
+    if (room.hostId !== socket.user.id) {
+      if (typeof callback === 'function') callback({ success: false, error: 'Only the host can accept join requests.' });
+      return;
+    }
+
+    const pending = room.pendingRequests.get(requestId);
+    if (!pending) {
+      if (typeof callback === 'function') callback({ success: false, error: 'Request no longer pending or applicant cancelled.' });
+      return;
+    }
+
+    room.pendingRequests.delete(requestId);
+    const targetSocket = pending.socket;
+    const max = room.maxParticipants || DEFAULT_MAX_PARTICIPANTS;
+
+    if (approved) {
+      if (room.participants.size >= max) {
+        targetSocket.emit('join-request-rejected', {
+          reason: `Party reached its maximum capacity of ${max} people.`
+        });
+        if (typeof callback === 'function') callback({ success: false, error: 'Party is already at capacity.' });
+        return;
+      }
+
+      targetSocket.join(room.roomId);
+
+      const participantInfo = {
+        socketId: targetSocket.id,
+        userId: pending.userId,
+        username: pending.username,
+        peerId: pending.peerId || null,
+        isHost: false,
+        isMuted: false,
+        isCameraOff: false,
+        joinedAt: new Date().toISOString()
+      };
+
+      room.participants.set(targetSocket.id, participantInfo);
+      console.log(`[Host Accepted] Host admitted ${pending.username} to ${room.roomId}`);
+
+      targetSocket.emit('join-request-accepted', {
+        success: true,
+        status: 'admitted',
+        roomId: room.roomId,
+        roomName: room.roomName,
+        isHost: false,
+        maxParticipants: max,
+        isLocked: !!room.isLocked,
+        isScreenSharing: room.isScreenSharing,
+        screenSharingPeerId: room.screenSharingPeerId,
+        participants: Array.from(room.participants.values())
+      });
+
+      targetSocket.to(room.roomId).emit('user-joined', {
+        participant: participantInfo,
+        participantsCount: room.participants.size
+      });
+
+      io.to(room.roomId).emit('chat-message', {
+        id: 'sys_' + Date.now(),
+        isSystem: true,
+        text: `${pending.username} was admitted to the party by the host.`,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      });
+
+      if (room.isScreenSharing && room.screenSharingPeerId) {
+        targetSocket.emit('screen-share-active', {
+          hostUsername: room.hostUsername,
+          peerId: room.screenSharingPeerId
+        });
+      }
+
+      if (typeof callback === 'function') callback({ success: true, approved: true });
+    } else {
+      console.log(`[Host Declined] Host rejected ${pending.username} from joining ${room.roomId}`);
+      targetSocket.emit('join-request-rejected', {
+        reason: 'The host declined your request to join this party.'
+      });
+      if (typeof callback === 'function') callback({ success: true, approved: false });
+    }
+  });
+
+  // Applicant cancels their pending knock
+  socket.on('cancel-join-request', () => {
+    if (!currentRoomId) return;
+    const room = rooms.get(currentRoomId);
+    if (!room) return;
+
+    if (room.pendingRequests.has(socket.id)) {
+      room.pendingRequests.delete(socket.id);
+      if (room.hostSocketId) {
+        io.to(room.hostSocketId).emit('join-request-cancelled', { requestId: socket.id });
+      }
+    }
+  });
+
+  // Host security control: Kick participant
+  socket.on('kick-participant', ({ targetSocketId }, callback) => {
+    if (!currentRoomId) return;
+    const room = rooms.get(currentRoomId);
+    if (!room) return;
+
+    if (room.hostId !== socket.user.id) {
+      if (typeof callback === 'function') callback({ success: false, error: 'Only the host can kick participants.' });
+      return;
+    }
+
+    if (targetSocketId === socket.id) {
+      if (typeof callback === 'function') callback({ success: false, error: 'Cannot kick yourself.' });
+      return;
+    }
+
+    const targetParticipant = room.participants.get(targetSocketId);
+    if (!targetParticipant) {
+      if (typeof callback === 'function') callback({ success: false, error: 'Participant not found.' });
+      return;
+    }
+
+    room.participants.delete(targetSocketId);
+
+    // Notify the kicked participant
+    io.to(targetSocketId).emit('kicked-from-room', {
+      message: 'You have been removed from the party by the host.'
+    });
+
+    const targetSocket = io.sockets.sockets.get(targetSocketId);
+    if (targetSocket) {
+      targetSocket.leave(currentRoomId);
+    }
+
+    // Broadcast left event
+    socket.to(currentRoomId).emit('user-left', {
+      socketId: targetSocketId,
+      peerId: targetParticipant.peerId,
+      userId: targetParticipant.userId,
+      username: targetParticipant.username,
+      remainingCount: room.participants.size
+    });
+
+    io.to(currentRoomId).emit('chat-message', {
+      id: 'sys_' + Date.now(),
+      isSystem: true,
+      text: `${targetParticipant.username} was removed from the party by the host.`,
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    });
+
+    if (typeof callback === 'function') callback({ success: true });
+  });
+
+  // Host security control: Toggle lock room
+  socket.on('toggle-lock-room', (callback) => {
+    if (!currentRoomId) return;
+    const room = rooms.get(currentRoomId);
+    if (!room) return;
+
+    if (room.hostId !== socket.user.id) {
+      if (typeof callback === 'function') callback({ success: false, error: 'Only the host can lock the room.' });
+      return;
+    }
+
+    room.isLocked = !room.isLocked;
+    console.log(`[Room Lock] Host ${socket.user.username} ${room.isLocked ? 'locked' : 'unlocked'} room ${currentRoomId}`);
+
+    io.to(currentRoomId).emit('room-lock-changed', { isLocked: room.isLocked });
+
+    io.to(currentRoomId).emit('chat-message', {
+      id: 'sys_' + Date.now(),
+      isSystem: true,
+      text: `Host ${room.isLocked ? 'locked 🔒' : 'unlocked 🔓'} the party.`,
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    });
+
+    if (typeof callback === 'function') callback({ success: true, isLocked: room.isLocked });
   });
 
   socket.on('update-peer-id', ({ peerId, roomId }) => {
@@ -689,16 +958,28 @@ io.on('connection', (socket) => {
   });
 
   socket.on('send-chat-message', ({ text }) => {
-    if (!currentRoomId || !text || !text.trim()) return;
+    if (!currentRoomId || !text) return;
     const room = rooms.get(currentRoomId);
     if (!room) return;
+
+    // Rate limiting / chat flood prevention: 350ms cooldown
+    const now = Date.now();
+    if (socket._lastChatTime && now - socket._lastChatTime < 350) {
+      return;
+    }
+    socket._lastChatTime = now;
+
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    // Length restriction (500 chars max)
+    const sanitizedText = trimmed.slice(0, 500);
 
     const message = {
       id: 'msg_' + Date.now() + Math.random().toString(36).substring(2, 6),
       userId: socket.user.id,
       username: socket.user.username,
       isHost: room.hostId === socket.user.id,
-      text: text.trim(),
+      text: sanitizedText,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
     };
 
@@ -711,6 +992,14 @@ io.on('connection', (socket) => {
     if (currentRoomId) {
       const room = rooms.get(currentRoomId);
       if (room) {
+        // Clean up from pending requests if user was in waiting room
+        if (room.pendingRequests && room.pendingRequests.has(socket.id)) {
+          room.pendingRequests.delete(socket.id);
+          if (room.hostSocketId) {
+            io.to(room.hostSocketId).emit('join-request-cancelled', { requestId: socket.id });
+          }
+        }
+
         const leavingParticipant = room.participants.get(socket.id);
         room.participants.delete(socket.id);
 
