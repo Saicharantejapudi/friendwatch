@@ -55,8 +55,18 @@ import {
   PictureInPicture2,
   ZoomIn,
   ZoomOut,
-  RotateCcw
+  RotateCcw,
+  Sliders
 } from 'lucide-react';
+
+// Stream quality & resolution presets for host screen share
+const STREAM_QUALITY_PRESETS = {
+  '1080p60': { label: '1080p 60fps', badge: '1080P 60FPS', desc: 'Ultra HD • Smooth Gaming & Action', width: 1920, height: 1080, frameRate: 60 },
+  '1080p30': { label: '1080p 30fps', badge: '1080P', desc: 'Full HD • Movie Night Standard', width: 1920, height: 1080, frameRate: 30 },
+  '720p60': { label: '720p 60fps', badge: '720P 60FPS', desc: 'HD 60fps • High Motion', width: 1280, height: 720, frameRate: 60 },
+  '720p30': { label: '720p 30fps', badge: '720P', desc: 'HD 30fps • Balanced Low Bandwidth', width: 1280, height: 720, frameRate: 30 },
+  '480p30': { label: '480p Data Saver', badge: '480P', desc: 'SD • Mobile & Low Connection', width: 854, height: 480, frameRate: 30 }
+};
 
 // Backend server URL - adjust if running in production
 const SERVER_URL = window.location.hostname === 'localhost' 
@@ -151,6 +161,8 @@ export default function App() {
   const panStartRef = useRef({ x: 0, y: 0 });
   const [showFacecamOverlay, setShowFacecamOverlay] = useState(false);
   const [facecamPosition, setFacecamPosition] = useState('bottom-right'); // 'bottom-right' | 'bottom-left'
+  const [streamQualityPreset, setStreamQualityPreset] = useState('1080p30'); // '1080p60' | '1080p30' | '720p60' | '720p30' | '480p30'
+  const [isQualityDropdownOpen, setIsQualityDropdownOpen] = useState(false);
 
   // ---------------------------------------------------------------------------
   // REFS FOR SOCKET, PEER, AUDIO ANALYZERS & MEDIA ELEMENTS
@@ -1285,14 +1297,15 @@ export default function App() {
     }
 
     try {
-      // High-performance screen capture: 1080p@30fps caps & crystal clear stereo audio
+      // High-performance screen capture using selected quality preset
+      const preset = STREAM_QUALITY_PRESETS[streamQualityPreset] || STREAM_QUALITY_PRESETS['1080p30'];
       const displayStream = await navigator.mediaDevices.getDisplayMedia({
         video: {
           cursor: 'always',
           displaySurface: 'browser',
-          width: { ideal: 1920, max: 1920 },
-          height: { ideal: 1080, max: 1080 },
-          frameRate: { ideal: 30, max: 30 }
+          width: { ideal: preset.width, max: preset.width },
+          height: { ideal: preset.height, max: preset.height },
+          frameRate: { ideal: preset.frameRate, max: preset.frameRate }
         },
         audio: {
           echoCancellation: false,
@@ -2369,7 +2382,7 @@ export default function App() {
               <div className="absolute top-4 left-4 flex items-center gap-2 z-10 pointer-events-none">
                 <div className="px-2.5 py-1 rounded-md bg-rose-600/90 text-white text-[11px] font-bold uppercase tracking-wider flex items-center gap-1.5 shadow-lg backdrop-blur-sm">
                   <span className="w-2 h-2 rounded-full bg-white animate-ping" />
-                  <span>LIVE 1080P</span>
+                  <span>LIVE {(STREAM_QUALITY_PRESETS[streamQualityPreset] || STREAM_QUALITY_PRESETS['1080p30']).badge}</span>
                 </div>
                 <div className="px-2.5 py-1 rounded-md bg-slate-900/80 text-slate-300 text-[11px] font-mono border border-slate-700/60 backdrop-blur-sm">
                   Opus Stereo 48kHz
@@ -2586,26 +2599,73 @@ export default function App() {
             {/* Left Control Status */}
             <div className="flex items-center gap-3">
               {roomState.isHost ? (
-                <button
-                  onClick={handleToggleScreenShare}
-                  className={`px-4 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition cursor-pointer ${
-                    isScreenSharing
-                      ? 'bg-rose-600 hover:bg-rose-500 text-white shadow-lg shadow-rose-600/20'
-                      : 'bg-brand-600 hover:bg-brand-500 text-white shadow-lg shadow-brand-500/20'
-                  }`}
-                >
-                  {isScreenSharing ? (
-                    <>
-                      <MonitorOff className="w-4 h-4" />
-                      <span>Stop Sharing</span>
-                    </>
-                  ) : (
-                    <>
-                      <MonitorPlay className="w-4 h-4" />
-                      <span>Share Screen & Audio</span>
-                    </>
-                  )}
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleToggleScreenShare}
+                    className={`px-4 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition cursor-pointer ${
+                      isScreenSharing
+                        ? 'bg-rose-600 hover:bg-rose-500 text-white shadow-lg shadow-rose-600/20'
+                        : 'bg-brand-600 hover:bg-brand-500 text-white shadow-lg shadow-brand-500/20'
+                    }`}
+                  >
+                    {isScreenSharing ? (
+                      <>
+                        <MonitorOff className="w-4 h-4" />
+                        <span>Stop Sharing</span>
+                      </>
+                    ) : (
+                      <>
+                        <MonitorPlay className="w-4 h-4" />
+                        <span>Share Screen & Audio</span>
+                      </>
+                    )}
+                  </button>
+
+                  {/* Host Stream Quality Preset Selector */}
+                  <div className="relative">
+                    <button
+                      onClick={() => setIsQualityDropdownOpen(prev => !prev)}
+                      title="Screen Share Quality & Resolution Settings"
+                      className="px-2.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition flex items-center gap-1.5 text-xs font-medium cursor-pointer shadow-sm"
+                    >
+                      <Sliders className="w-3.5 h-3.5 text-brand-400" />
+                      <span className="font-mono text-[11px] hidden sm:inline">
+                        {(STREAM_QUALITY_PRESETS[streamQualityPreset] || STREAM_QUALITY_PRESETS['1080p30']).label}
+                      </span>
+                      <ChevronDown className="w-3 h-3 text-slate-400" />
+                    </button>
+
+                    {isQualityDropdownOpen && (
+                      <div className="absolute bottom-12 left-0 z-50 w-64 rounded-xl bg-slate-900/95 border border-slate-700/80 shadow-2xl p-2 backdrop-blur-xl animate-fade-in space-y-1">
+                        <div className="px-2 py-1 text-[11px] font-bold uppercase tracking-wider text-slate-400 border-b border-slate-800">
+                          Stream Quality & FPS
+                        </div>
+                        {Object.entries(STREAM_QUALITY_PRESETS).map(([key, item]) => (
+                          <button
+                            key={key}
+                            onClick={() => {
+                              setStreamQualityPreset(key);
+                              setIsQualityDropdownOpen(false);
+                            }}
+                            className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs transition flex flex-col cursor-pointer ${
+                              streamQualityPreset === key
+                                ? 'bg-brand-600 text-white font-semibold'
+                                : 'hover:bg-slate-800 text-slate-300'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between">
+                              <span>{item.label}</span>
+                              {streamQualityPreset === key && <Check className="w-3.5 h-3.5" />}
+                            </div>
+                            <span className={`text-[10px] ${streamQualityPreset === key ? 'text-white/80' : 'text-slate-400'}`}>
+                              {item.desc}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
               ) : (
                 <div className="text-xs text-slate-400 flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-800/50 border border-slate-700/50">
                   <ShieldAlert className="w-3.5 h-3.5 text-slate-500" />
