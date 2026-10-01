@@ -52,7 +52,10 @@ import {
   Scaling,
   Tv,
   GripVertical,
-  PictureInPicture2
+  PictureInPicture2,
+  ZoomIn,
+  ZoomOut,
+  RotateCcw
 } from 'lucide-react';
 
 // Backend server URL - adjust if running in production
@@ -142,6 +145,10 @@ export default function App() {
   const [sidebarWidth, setSidebarWidth] = useState(320); // in pixels (default: 320px)
   const [isResizingSidebar, setIsResizingSidebar] = useState(false);
   const [isPiPActive, setIsPiPActive] = useState(false);
+  const [zoomLevel, setZoomLevel] = useState(1); // 1.0x to 3.5x
+  const [panPosition, setPanPosition] = useState({ x: 0, y: 0 });
+  const [isPanning, setIsPanning] = useState(false);
+  const panStartRef = useRef({ x: 0, y: 0 });
 
   // ---------------------------------------------------------------------------
   // REFS FOR SOCKET, PEER, AUDIO ANALYZERS & MEDIA ELEMENTS
@@ -1580,6 +1587,60 @@ export default function App() {
     }
   };
 
+  const handleZoomIn = () => {
+    setZoomLevel(prev => Math.min(3.5, +(prev + 0.25).toFixed(2)));
+  };
+
+  const handleZoomOut = () => {
+    setZoomLevel(prev => {
+      const next = Math.max(1, +(prev - 0.25).toFixed(2));
+      if (next === 1) setPanPosition({ x: 0, y: 0 });
+      return next;
+    });
+  };
+
+  const handleResetZoom = () => {
+    setZoomLevel(1);
+    setPanPosition({ x: 0, y: 0 });
+  };
+
+  const handleVideoMouseDown = (e) => {
+    if (zoomLevel <= 1) return;
+    setIsPanning(true);
+    panStartRef.current = {
+      x: e.clientX - panPosition.x,
+      y: e.clientY - panPosition.y
+    };
+  };
+
+  const handleVideoMouseMove = (e) => {
+    if (!isPanning || zoomLevel <= 1) return;
+    setPanPosition({
+      x: e.clientX - panStartRef.current.x,
+      y: e.clientY - panStartRef.current.y
+    });
+  };
+
+  const handleVideoMouseUp = () => {
+    setIsPanning(false);
+  };
+
+  const handleVideoWheel = (e) => {
+    if (!isScreenSharing) return;
+    if (e.ctrlKey || e.metaKey || e.altKey) {
+      e.preventDefault();
+      if (e.deltaY < 0) {
+        setZoomLevel(prev => Math.min(3.5, +(prev + 0.15).toFixed(2)));
+      } else {
+        setZoomLevel(prev => {
+          const next = Math.max(1, +(prev - 0.15).toFixed(2));
+          if (next === 1) setPanPosition({ x: 0, y: 0 });
+          return next;
+        });
+      }
+    }
+  };
+
   // Keyboard shortcut listener for cinema controls (T for theater, Esc to exit)
   useEffect(() => {
     const handleKeyDown = (e) => {
@@ -2200,14 +2261,28 @@ export default function App() {
           }`}
         >
           {/* Main Video Stream Container (16:9 Aspect Ratio & Letterboxing) */}
-          <div className="flex-1 flex items-center justify-center relative w-full h-full rounded-xl overflow-hidden bg-slate-950 border border-slate-800/60 shadow-2xl">
+          <div
+            onWheel={handleVideoWheel}
+            onMouseDown={handleVideoMouseDown}
+            onMouseMove={handleVideoMouseMove}
+            onMouseUp={handleVideoMouseUp}
+            onMouseLeave={handleVideoMouseUp}
+            className={`flex-1 flex items-center justify-center relative w-full h-full rounded-xl overflow-hidden bg-slate-950 border border-slate-800/60 shadow-2xl select-none ${
+              zoomLevel > 1 ? (isPanning ? 'cursor-grabbing' : 'cursor-grab') : ''
+            }`}
+          >
             {/* Live Host Screen Share Video */}
             <video
               ref={screenVideoRef}
               autoPlay
               playsInline
               muted={true}
-              className={`w-full h-full transition-all duration-200 ${
+              style={{
+                transform: zoomLevel > 1 ? `scale(${zoomLevel}) translate(${panPosition.x / zoomLevel}px, ${panPosition.y / zoomLevel}px)` : undefined,
+                transformOrigin: 'center center',
+                transition: isPanning ? 'none' : 'transform 0.15s ease-out'
+              }}
+              className={`w-full h-full ${
                 videoFitMode === 'cover'
                   ? 'object-cover'
                   : videoFitMode === 'fill'
@@ -2300,8 +2375,45 @@ export default function App() {
               </div>
             )}
 
-            {/* Top Right Controls Overlay (Aspect Ratio + Theater + PiP + Fullscreen) */}
+            {/* Top Right Controls Overlay (Zoom + Aspect Ratio + Theater + PiP + Fullscreen) */}
             <div className="absolute top-4 right-4 flex items-center gap-2 z-10">
+              {/* Zoom & Pan Controls Pill */}
+              {isScreenSharing && (
+                <div className="flex items-center gap-1 bg-slate-900/80 border border-slate-700/60 backdrop-blur-sm rounded-lg p-1 shadow-md text-xs">
+                  <button
+                    onClick={handleZoomOut}
+                    disabled={zoomLevel <= 1}
+                    title="Zoom Out (Ctrl/Alt + Scroll Down)"
+                    className="p-1 rounded hover:bg-slate-800 text-slate-300 hover:text-white disabled:opacity-40 disabled:hover:bg-transparent transition cursor-pointer"
+                  >
+                    <ZoomOut className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    onClick={handleResetZoom}
+                    title="Click to reset zoom to 100%"
+                    className="px-1.5 py-0.5 rounded text-[10px] font-mono font-semibold text-brand-300 hover:bg-slate-800 transition cursor-pointer"
+                  >
+                    {Math.round(zoomLevel * 100)}%
+                  </button>
+                  <button
+                    onClick={handleZoomIn}
+                    disabled={zoomLevel >= 3.5}
+                    title="Zoom In (Ctrl/Alt + Scroll Up)"
+                    className="p-1 rounded hover:bg-slate-800 text-slate-300 hover:text-white disabled:opacity-40 disabled:hover:bg-transparent transition cursor-pointer"
+                  >
+                    <ZoomIn className="w-3.5 h-3.5" />
+                  </button>
+                  {zoomLevel > 1 && (
+                    <button
+                      onClick={handleResetZoom}
+                      title="Reset Zoom & Pan to default"
+                      className="p-1 rounded hover:bg-slate-800 text-amber-400 hover:text-amber-300 transition cursor-pointer"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+              )}
               {isScreenSharing && (
                 <button
                   onClick={cycleVideoFitMode}
