@@ -51,7 +51,8 @@ import {
   Shield,
   Scaling,
   Tv,
-  GripVertical
+  GripVertical,
+  PictureInPicture2
 } from 'lucide-react';
 
 // Backend server URL - adjust if running in production
@@ -140,6 +141,7 @@ export default function App() {
   const [isTheaterMode, setIsTheaterMode] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(320); // in pixels (default: 320px)
   const [isResizingSidebar, setIsResizingSidebar] = useState(false);
+  const [isPiPActive, setIsPiPActive] = useState(false);
 
   // ---------------------------------------------------------------------------
   // REFS FOR SOCKET, PEER, AUDIO ANALYZERS & MEDIA ELEMENTS
@@ -1561,6 +1563,23 @@ export default function App() {
     }
   };
 
+  const togglePictureInPicture = async () => {
+    try {
+      if (!screenVideoRef.current) return;
+      if (document.pictureInPictureElement) {
+        await document.exitPictureInPicture();
+        setIsPiPActive(false);
+      } else if (document.pictureInPictureEnabled) {
+        await screenVideoRef.current.requestPictureInPicture();
+        setIsPiPActive(true);
+      } else {
+        alert('Picture-in-Picture is not supported in this browser.');
+      }
+    } catch (err) {
+      console.error('[PiP Error]:', err);
+    }
+  };
+
   // Keyboard shortcut listener for cinema controls (T for theater, Esc to exit)
   useEffect(() => {
     const handleKeyDown = (e) => {
@@ -2281,7 +2300,7 @@ export default function App() {
               </div>
             )}
 
-            {/* Top Right Controls Overlay (Aspect Ratio + Theater + Fullscreen) */}
+            {/* Top Right Controls Overlay (Aspect Ratio + Theater + PiP + Fullscreen) */}
             <div className="absolute top-4 right-4 flex items-center gap-2 z-10">
               {isScreenSharing && (
                 <button
@@ -2307,6 +2326,19 @@ export default function App() {
                 <Tv className="w-4 h-4" />
                 <span className="hidden sm:inline text-[11px] font-mono">{isTheaterMode ? 'Exit Cinema' : 'Cinema'}</span>
               </button>
+              {isScreenSharing && (
+                <button
+                  onClick={togglePictureInPicture}
+                  title={isPiPActive ? 'Exit Picture-in-Picture' : 'Picture-in-Picture (Pop out floating video)'}
+                  className={`p-2 rounded-lg border backdrop-blur-sm transition z-10 cursor-pointer shadow-md flex items-center gap-1.5 text-xs font-semibold ${
+                    isPiPActive
+                      ? 'bg-brand-600 text-white border-brand-400'
+                      : 'bg-slate-900/80 hover:bg-slate-800 text-slate-300 hover:text-white border-slate-700/60'
+                  }`}
+                >
+                  <PictureInPicture2 className="w-4 h-4" />
+                </button>
+              )}
               <button
                 onClick={toggleFullscreen}
                 title={isFullscreen ? 'Exit Fullscreen' : 'Enter Fullscreen'}
