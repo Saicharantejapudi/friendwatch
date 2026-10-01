@@ -159,8 +159,8 @@ export default function App() {
   const [panPosition, setPanPosition] = useState({ x: 0, y: 0 });
   const [isPanning, setIsPanning] = useState(false);
   const panStartRef = useRef({ x: 0, y: 0 });
-  const [showFacecamOverlay, setShowFacecamOverlay] = useState(false);
-  const [facecamPosition, setFacecamPosition] = useState('bottom-right'); // 'bottom-right' | 'bottom-left'
+  const [showControls, setShowControls] = useState(true);
+  const controlsTimeoutRef = useRef(null);
   const [streamQualityPreset, setStreamQualityPreset] = useState('1080p30'); // '1080p60' | '1080p30' | '720p60' | '720p30' | '480p30'
   const [isQualityDropdownOpen, setIsQualityDropdownOpen] = useState(false);
 
@@ -1656,11 +1656,35 @@ export default function App() {
     }
   };
 
+  // Auto-hide on-screen controls & badges after 3 seconds of inactivity for clean movie display
+  const handleUserActivity = () => {
+    setShowControls(true);
+    if (controlsTimeoutRef.current) {
+      clearTimeout(controlsTimeoutRef.current);
+    }
+    controlsTimeoutRef.current = setTimeout(() => {
+      setShowControls(false);
+    }, 3000);
+  };
+
+  useEffect(() => {
+    if (isScreenSharing) {
+      handleUserActivity();
+    } else {
+      setShowControls(true);
+    }
+    return () => {
+      if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current);
+    };
+  }, [isScreenSharing]);
+
   // Keyboard shortcut listener for cinema controls (T for theater, Esc to exit)
   useEffect(() => {
     const handleKeyDown = (e) => {
       const tag = document.activeElement?.tagName?.toLowerCase();
       if (tag === 'input' || tag === 'textarea') return;
+
+      handleUserActivity();
 
       if (e.key === 't' || e.key === 'T') {
         setIsTheaterMode(prev => !prev);
@@ -2197,7 +2221,9 @@ export default function App() {
 
       {/* Theater Mode Top Control Pill */}
       {isTheaterMode && (
-        <div className="absolute top-3 left-1/2 -translate-x-1/2 z-40 flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-900/90 border border-slate-700/80 backdrop-blur-md shadow-2xl text-xs text-slate-300 animate-fade-in">
+        <div className={`absolute top-3 left-1/2 -translate-x-1/2 z-40 flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-900/90 border border-slate-700/80 backdrop-blur-md shadow-2xl text-xs text-slate-300 transition-all duration-500 ${
+          showControls ? 'opacity-100 translate-y-0 pointer-events-auto' : 'opacity-0 -translate-y-2 pointer-events-none'
+        }`}>
           <span className="flex items-center gap-1.5 font-medium text-brand-300">
             <Tv className="w-3.5 h-3.5 text-brand-400" />
             Cinema Mode (T)
@@ -2266,6 +2292,7 @@ export default function App() {
         {/* =================================================================== */}
         <section
           ref={mainPlayerContainerRef}
+          onMouseMove={handleUserActivity}
           style={
             !isTheaterMode && isChatOpen
               ? { width: `calc(100% - ${sidebarWidth}px)` }
@@ -2278,12 +2305,25 @@ export default function App() {
           {/* Main Video Stream Container (16:9 Aspect Ratio & Letterboxing) */}
           <div
             onWheel={handleVideoWheel}
-            onMouseDown={handleVideoMouseDown}
-            onMouseMove={handleVideoMouseMove}
+            onMouseDown={(e) => {
+              handleUserActivity();
+              handleVideoMouseDown(e);
+            }}
+            onMouseMove={(e) => {
+              handleUserActivity();
+              handleVideoMouseMove(e);
+            }}
             onMouseUp={handleVideoMouseUp}
-            onMouseLeave={handleVideoMouseUp}
+            onMouseLeave={() => {
+              handleVideoMouseUp();
+              if (isScreenSharing) {
+                setShowControls(false);
+              }
+            }}
             className={`flex-1 flex items-center justify-center relative w-full h-full rounded-xl overflow-hidden bg-slate-950 border border-slate-800/60 shadow-2xl select-none ${
-              zoomLevel > 1 ? (isPanning ? 'cursor-grabbing' : 'cursor-grab') : ''
+              zoomLevel > 1
+                ? (isPanning ? 'cursor-grabbing' : 'cursor-grab')
+                : (!showControls && isScreenSharing ? 'cursor-none' : '')
             }`}
           >
             {/* Live Host Screen Share Video */}
@@ -2379,7 +2419,9 @@ export default function App() {
 
             {/* Top Overlay Badge inside Video Container */}
             {isScreenSharing && (
-              <div className="absolute top-4 left-4 flex items-center gap-2 z-10 pointer-events-none">
+              <div className={`absolute top-4 left-4 flex items-center gap-2 z-10 pointer-events-none transition-all duration-500 ${
+                showControls ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-2'
+              }`}>
                 <div className="px-2.5 py-1 rounded-md bg-rose-600/90 text-white text-[11px] font-bold uppercase tracking-wider flex items-center gap-1.5 shadow-lg backdrop-blur-sm">
                   <span className="w-2 h-2 rounded-full bg-white animate-ping" />
                   <span>LIVE {(STREAM_QUALITY_PRESETS[streamQualityPreset] || STREAM_QUALITY_PRESETS['1080p30']).badge}</span>
@@ -2391,7 +2433,9 @@ export default function App() {
             )}
 
             {/* Top Right Controls Overlay (Zoom + Aspect Ratio + Theater + PiP + Fullscreen) */}
-            <div className="absolute top-4 right-4 flex items-center gap-2 z-10">
+            <div className={`absolute top-4 right-4 flex items-center gap-2 z-10 transition-all duration-500 ${
+              showControls ? 'opacity-100 translate-y-0 pointer-events-auto' : 'opacity-0 -translate-y-2 pointer-events-none'
+            }`}>
               {/* Zoom & Pan Controls Pill */}
               {isScreenSharing && (
                 <div className="flex items-center gap-1 bg-slate-900/80 border border-slate-700/60 backdrop-blur-sm rounded-lg p-1 shadow-md text-xs">
@@ -2453,19 +2497,6 @@ export default function App() {
                 <Tv className="w-4 h-4" />
                 <span className="hidden sm:inline text-[11px] font-mono">{isTheaterMode ? 'Exit Cinema' : 'Cinema'}</span>
               </button>
-              {/* Streamer Facecam Overlay Toggle */}
-              <button
-                onClick={() => setShowFacecamOverlay(prev => !prev)}
-                title={showFacecamOverlay ? 'Hide Streamer Facecams on Screen' : 'Show Streamer Facecams on Screen'}
-                className={`p-2 rounded-lg border backdrop-blur-sm transition z-10 cursor-pointer shadow-md flex items-center gap-1.5 text-xs font-semibold ${
-                  showFacecamOverlay
-                    ? 'bg-purple-600 hover:bg-purple-500 text-white border-purple-400 ring-1 ring-purple-400/50'
-                    : 'bg-slate-900/80 hover:bg-slate-800 text-slate-300 hover:text-white border-slate-700/60'
-                }`}
-              >
-                <Smile className="w-4 h-4" />
-                <span className="hidden sm:inline text-[11px] font-mono">{showFacecamOverlay ? 'Facecams On' : 'Facecams'}</span>
-              </button>
               {isScreenSharing && (
                 <button
                   onClick={togglePictureInPicture}
@@ -2487,115 +2518,14 @@ export default function App() {
                 {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
               </button>
             </div>
-
-            {/* STREAMER-STYLE FACECAM OVERLAYS ON SCREEN */}
-            {showFacecamOverlay && (
-              <div
-                className={`absolute z-20 flex flex-wrap gap-2.5 p-2 rounded-2xl bg-slate-950/85 backdrop-blur-xl border border-slate-800/80 shadow-2xl transition-all duration-300 max-w-[85%] ${
-                  facecamPosition === 'bottom-left'
-                    ? 'bottom-4 left-4'
-                    : 'bottom-4 right-4'
-                }`}
-              >
-                {/* Overlay Header Mini-Bar */}
-                <div className="w-full flex items-center justify-between px-1.5 pb-1 border-b border-slate-800/60 text-[10px] text-slate-400">
-                  <span className="font-semibold text-brand-300 flex items-center gap-1">
-                    <Smile className="w-3 h-3 text-brand-400" />
-                    Streamer Facecams
-                  </span>
-                  <div className="flex items-center gap-1.5">
-                    <button
-                      onClick={() => setFacecamPosition(prev => prev === 'bottom-right' ? 'bottom-left' : 'bottom-right')}
-                      title="Switch dock position"
-                      className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition cursor-pointer text-[9px]"
-                    >
-                      {facecamPosition === 'bottom-right' ? '← Move Left' : 'Move Right →'}
-                    </button>
-                    <button
-                      onClick={() => setShowFacecamOverlay(false)}
-                      title="Close facecam overlay"
-                      className="p-0.5 rounded hover:bg-slate-800 text-slate-400 hover:text-white transition cursor-pointer"
-                    >
-                      ✕
-                    </button>
-                  </div>
-                </div>
-
-                {/* Local User Facecam Bubble */}
-                <div
-                  onClick={() => handleTogglePin({
-                    userId: currentUser.id,
-                    username: currentUser.username,
-                    peerId: peerRef.current?.id,
-                    isLocal: true
-                  })}
-                  title={`You (${currentUser.username}) - Click to pin`}
-                  className={`relative w-28 sm:w-32 aspect-video rounded-xl overflow-hidden bg-slate-900 border transition cursor-pointer flex items-center justify-center shadow-lg group ${
-                    activeSpeakers.has('local')
-                      ? 'border-emerald-400 ring-2 ring-emerald-400/50'
-                      : 'border-slate-700/80 hover:border-brand-500'
-                  }`}
-                >
-                  {localStream && !isCameraOff ? (
-                    <ParticipantVideo stream={localStream} className="w-full h-full object-cover transform -scale-x-100" />
-                  ) : (
-                    <div className="w-8 h-8 rounded-full bg-brand-600 flex items-center justify-center font-bold text-xs text-white shadow">
-                      {currentUser.username[0]?.toUpperCase()}
-                    </div>
-                  )}
-                  <div className="absolute bottom-1 left-1 right-1 flex items-center justify-between px-1.5 py-0.5 rounded bg-black/70 backdrop-blur-xs text-[9px] text-white">
-                    <span className="truncate max-w-[60px] font-medium">{currentUser.username}</span>
-                    {isMicMuted ? <MicOff className="w-2.5 h-2.5 text-rose-400" /> : <Mic className="w-2.5 h-2.5 text-emerald-400" />}
-                  </div>
-                </div>
-
-                {/* Remote Participants Facecam Bubbles */}
-                {roomState.participants
-                  .filter(p => p.userId !== currentUser.id)
-                  .map(participant => {
-                    const stream = participant.peerId ? remoteStreams[participant.peerId] : null;
-                    const isSpeaking = activeSpeakers.has(participant.userId) || (participant.peerId && activeSpeakers.has(participant.peerId));
-
-                    return (
-                      <div
-                        key={`facecam-${participant.socketId}`}
-                        onClick={() => handleTogglePin({
-                          userId: participant.userId,
-                          username: participant.username,
-                          peerId: participant.peerId,
-                          isLocal: false
-                        })}
-                        title={`${participant.username} - Click to pin`}
-                        className={`relative w-28 sm:w-32 aspect-video rounded-xl overflow-hidden bg-slate-900 border transition cursor-pointer flex items-center justify-center shadow-lg group ${
-                          isSpeaking
-                            ? 'border-emerald-400 ring-2 ring-emerald-400/50'
-                            : 'border-slate-700/80 hover:border-brand-500'
-                        }`}
-                      >
-                        {stream && !participant.isCameraOff ? (
-                          <ParticipantVideo stream={stream} isSpeakerMuted={isSpeakerMuted} />
-                        ) : (
-                          <div className="w-8 h-8 rounded-full bg-slate-700 flex items-center justify-center font-bold text-xs text-white shadow">
-                            {participant.username[0]?.toUpperCase()}
-                          </div>
-                        )}
-                        <div className="absolute bottom-1 left-1 right-1 flex items-center justify-between px-1.5 py-0.5 rounded bg-black/70 backdrop-blur-xs text-[9px] text-white">
-                          <span className="truncate max-w-[60px] font-medium">{participant.username}</span>
-                          {participant.isMicMuted ? (
-                            <MicOff className="w-2.5 h-2.5 text-rose-400" />
-                          ) : (
-                            <Mic className="w-2.5 h-2.5 text-emerald-400" />
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })}
-              </div>
-            )}
           </div>
 
           {/* Host & Stream Controls Bar (Bottom of Player) */}
-          <div className="h-16 mt-3 px-4 rounded-xl bg-slate-900/80 border border-slate-800/80 flex items-center justify-between flex-shrink-0 backdrop-blur-md">
+          <div className={`h-16 mt-3 px-4 rounded-xl bg-slate-900/80 border border-slate-800/80 flex items-center justify-between flex-shrink-0 backdrop-blur-md transition-all duration-500 ${
+            (isTheaterMode || isFullscreen) && !showControls
+              ? 'opacity-0 translate-y-4 pointer-events-none'
+              : 'opacity-100 translate-y-0'
+          }`}>
             {/* Left Control Status */}
             <div className="flex items-center gap-3">
               {roomState.isHost ? (
