@@ -1127,10 +1127,10 @@ export default function App() {
 
     const videoTrack = stream.getVideoTracks()[0];
     if (videoTrack) {
-      const off = !videoTrack.enabled;
-      videoTrack.enabled = !off;
-      setIsCameraOff(off);
-      socketRef.current?.emit('media-status-change', { isCameraOff: off });
+      const nextCameraOff = !isCameraOff;
+      videoTrack.enabled = !nextCameraOff;
+      setIsCameraOff(nextCameraOff);
+      socketRef.current?.emit('media-status-change', { isCameraOff: nextCameraOff });
     }
   };
 
