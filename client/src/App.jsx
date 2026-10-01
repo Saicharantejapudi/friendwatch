@@ -50,7 +50,8 @@ import {
   Clock,
   Shield,
   Scaling,
-  Tv
+  Tv,
+  GripVertical
 } from 'lucide-react';
 
 // Backend server URL - adjust if running in production
@@ -137,6 +138,8 @@ export default function App() {
   const [videoFitMode, setVideoFitMode] = useState('contain'); // 'contain' (Fit) | 'cover' (Fill) | 'fill' (Stretch)
   const [fitModeToast, setFitModeToast] = useState(null);
   const [isTheaterMode, setIsTheaterMode] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(320); // in pixels (default: 320px)
+  const [isResizingSidebar, setIsResizingSidebar] = useState(false);
 
   // ---------------------------------------------------------------------------
   // REFS FOR SOCKET, PEER, AUDIO ANALYZERS & MEDIA ELEMENTS
@@ -1575,6 +1578,39 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isTheaterMode]);
 
+  // Dynamic Draggable Splitter for Sidebar Resizing
+  useEffect(() => {
+    if (!isResizingSidebar) return;
+
+    const handleMouseMove = (e) => {
+      // Calculate width from right edge of screen
+      const newWidth = window.innerWidth - e.clientX;
+      // Clamp between 240px and 650px (and not more than 55% of window width)
+      const maxAllowed = Math.min(650, window.innerWidth * 0.55);
+      const clampedWidth = Math.max(240, Math.min(newWidth, maxAllowed));
+      setSidebarWidth(clampedWidth);
+    };
+
+    const handleMouseUp = () => {
+      setIsResizingSidebar(false);
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+    };
+
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'col-resize';
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+    };
+  }, [isResizingSidebar]);
+
   // ---------------------------------------------------------------------------
   // VIEW RENDER: 1. AUTHENTICATION & INSTANT GUEST ENTRY
   // ---------------------------------------------------------------------------
@@ -2131,16 +2167,17 @@ export default function App() {
       {/* Main Body Split-Panel Layout */}
       <div className="flex-1 flex overflow-hidden relative">
         {/* =================================================================== */}
-        {/* LEFT PANEL: MAIN SCREEN SHARE AREA (70% to 75% width) */}
+        {/* LEFT PANEL: MAIN SCREEN SHARE AREA */}
         {/* =================================================================== */}
         <section
           ref={mainPlayerContainerRef}
-          className={`flex-1 flex flex-col bg-black relative justify-between p-4 overflow-hidden transition-all duration-300 ${
-            isTheaterMode
-              ? 'w-full'
-              : isChatOpen
-                ? 'w-[70%] sm:w-[72%] md:w-[74%]'
-                : 'w-full'
+          style={
+            !isTheaterMode && isChatOpen
+              ? { width: `calc(100% - ${sidebarWidth}px)` }
+              : { width: '100%' }
+          }
+          className={`flex-1 flex flex-col bg-black relative justify-between p-4 overflow-hidden ${
+            isResizingSidebar ? '' : 'transition-all duration-200'
           }`}
         >
           {/* Main Video Stream Container (16:9 Aspect Ratio & Letterboxing) */}
@@ -2624,15 +2661,38 @@ export default function App() {
           </div>
         </section>
 
+        {/* DRAGGABLE RESIZER HANDLE (Adjusts Screen vs Sidebar width) */}
+        {!isTheaterMode && isChatOpen && (
+          <div
+            onMouseDown={(e) => {
+              e.preventDefault();
+              setIsResizingSidebar(true);
+            }}
+            title="Drag left/right to resize sidebar"
+            className={`w-1.5 hover:w-2 group relative bg-slate-800/80 hover:bg-brand-500/80 cursor-col-resize transition-all duration-150 flex items-center justify-center flex-shrink-0 z-20 select-none ${
+              isResizingSidebar ? 'bg-brand-500 w-2 ring-2 ring-brand-500/40' : ''
+            }`}
+          >
+            <div className="absolute opacity-0 group-hover:opacity-100 transition-opacity bg-slate-900 border border-slate-700 rounded p-0.5 pointer-events-none shadow-lg">
+              <GripVertical className="w-3 h-3 text-brand-300" />
+            </div>
+          </div>
+        )}
+
         {/* =================================================================== */}
         {/* RIGHT PANEL: INTERACTIVE SIDEBAR */}
         {/* =================================================================== */}
         {isChatOpen && (
           <aside
-            className={`flex flex-col flex-shrink-0 overflow-hidden transition-all duration-300 ${
+            style={
+              !isTheaterMode
+                ? { width: `${sidebarWidth}px` }
+                : undefined
+            }
+            className={`flex flex-col flex-shrink-0 overflow-hidden ${
               isTheaterMode
-                ? 'absolute top-4 bottom-4 right-4 w-[340px] max-w-[90vw] bg-slate-900/95 backdrop-blur-xl border border-slate-700/80 shadow-2xl rounded-2xl z-30'
-                : 'w-[30%] sm:w-[28%] md:w-[26%] min-w-[280px] max-w-[380px] bg-slate-900 border-l border-slate-800 z-10'
+                ? 'absolute top-4 bottom-4 right-4 w-[340px] max-w-[90vw] bg-slate-900/95 backdrop-blur-xl border border-slate-700/80 shadow-2xl rounded-2xl z-30 transition-all duration-300'
+                : `bg-slate-900 border-l border-slate-800 z-10 ${isResizingSidebar ? '' : 'transition-all duration-200'}`
             }`}
           >
             {/* ------------------------------------------------------------- */}
