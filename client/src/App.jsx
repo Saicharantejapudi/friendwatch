@@ -48,7 +48,8 @@ import {
   UserX,
   UserCheck,
   Clock,
-  Shield
+  Shield,
+  Scaling
 } from 'lucide-react';
 
 // Backend server URL - adjust if running in production
@@ -132,6 +133,8 @@ export default function App() {
   const [isChatOpen, setIsChatOpen] = useState(true);
   const [pinnedUser, setPinnedUser] = useState(null); // { userId, username, peerId, isLocal }
   const [mainStageView, setMainStageView] = useState('auto'); // 'auto' | 'screen' | 'pin'
+  const [videoFitMode, setVideoFitMode] = useState('contain'); // 'contain' (Fit) | 'cover' (Fill) | 'fill' (Stretch)
+  const [fitModeToast, setFitModeToast] = useState(null);
 
   // ---------------------------------------------------------------------------
   // REFS FOR SOCKET, PEER, AUDIO ANALYZERS & MEDIA ELEMENTS
@@ -1518,6 +1521,26 @@ export default function App() {
     setTimeout(() => setCopiedCode(false), 2000);
   };
 
+  const cycleVideoFitMode = () => {
+    setVideoFitMode(prev => {
+      let nextMode = 'contain';
+      let label = 'Fit (Original 16:9 Letterboxed)';
+      if (prev === 'contain') {
+        nextMode = 'cover';
+        label = 'Fill (Zoomed • No Black Bars)';
+      } else if (prev === 'cover') {
+        nextMode = 'fill';
+        label = 'Stretch (Full Player Width/Height)';
+      } else {
+        nextMode = 'contain';
+        label = 'Fit (Original 16:9 Letterboxed)';
+      }
+      setFitModeToast(label);
+      setTimeout(() => setFitModeToast(null), 1800);
+      return nextMode;
+    });
+  };
+
   const toggleFullscreen = () => {
     if (!mainPlayerContainerRef.current) return;
     if (!document.fullscreenElement) {
@@ -2080,8 +2103,22 @@ export default function App() {
               autoPlay
               playsInline
               muted={true}
-              className={`w-full h-full object-contain ${isScreenSharing ? 'block' : 'hidden'}`}
+              className={`w-full h-full transition-all duration-200 ${
+                videoFitMode === 'cover'
+                  ? 'object-cover'
+                  : videoFitMode === 'fill'
+                    ? 'object-fill'
+                    : 'object-contain'
+              } ${isScreenSharing ? 'block' : 'hidden'}`}
             />
+
+            {/* Aspect Ratio Switch Toast Notification */}
+            {fitModeToast && (
+              <div className="absolute top-16 left-1/2 -translate-x-1/2 px-4 py-2 rounded-xl bg-slate-900/95 border border-brand-500/60 text-white text-xs font-semibold backdrop-blur-md shadow-2xl animate-fade-in pointer-events-none z-30 flex items-center gap-2">
+                <Scaling className="w-4 h-4 text-brand-400" />
+                <span>{fitModeToast}</span>
+              </div>
+            )}
 
             {/* Audio Alert Banner if Host Forgot to Check "Share Audio" */}
             {screenAudioAlert && roomState.isHost && isScreenSharing && (
@@ -2159,14 +2196,28 @@ export default function App() {
               </div>
             )}
 
-            {/* Fullscreen Button Overlay */}
-            <button
-              onClick={toggleFullscreen}
-              title={isFullscreen ? 'Exit Fullscreen' : 'Enter Fullscreen'}
-              className="absolute top-4 right-4 p-2 rounded-lg bg-slate-900/80 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-700/60 backdrop-blur-sm transition z-10 cursor-pointer"
-            >
-              {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
-            </button>
+            {/* Top Right Controls Overlay (Aspect Ratio + Fullscreen) */}
+            <div className="absolute top-4 right-4 flex items-center gap-2 z-10">
+              {isScreenSharing && (
+                <button
+                  onClick={cycleVideoFitMode}
+                  title={`Aspect Ratio: ${videoFitMode.toUpperCase()} (Click to toggle Fit / Fill / Stretch)`}
+                  className="px-2.5 py-1.5 rounded-lg bg-slate-900/80 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-700/60 backdrop-blur-sm transition flex items-center gap-1.5 text-xs font-semibold cursor-pointer shadow-md"
+                >
+                  <Scaling className="w-3.5 h-3.5 text-brand-400" />
+                  <span className="uppercase text-[10px] tracking-wider font-mono">
+                    {videoFitMode === 'contain' ? 'Fit' : videoFitMode === 'cover' ? 'Fill' : 'Stretch'}
+                  </span>
+                </button>
+              )}
+              <button
+                onClick={toggleFullscreen}
+                title={isFullscreen ? 'Exit Fullscreen' : 'Enter Fullscreen'}
+                className="p-2 rounded-lg bg-slate-900/80 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-700/60 backdrop-blur-sm transition z-10 cursor-pointer shadow-md"
+              >
+                {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
+              </button>
+            </div>
           </div>
 
           {/* Host & Stream Controls Bar (Bottom of Player) */}
