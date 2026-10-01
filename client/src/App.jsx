@@ -49,7 +49,8 @@ import {
   UserCheck,
   Clock,
   Shield,
-  Scaling
+  Scaling,
+  Tv
 } from 'lucide-react';
 
 // Backend server URL - adjust if running in production
@@ -135,6 +136,7 @@ export default function App() {
   const [mainStageView, setMainStageView] = useState('auto'); // 'auto' | 'screen' | 'pin'
   const [videoFitMode, setVideoFitMode] = useState('contain'); // 'contain' (Fit) | 'cover' (Fill) | 'fill' (Stretch)
   const [fitModeToast, setFitModeToast] = useState(null);
+  const [isTheaterMode, setIsTheaterMode] = useState(false);
 
   // ---------------------------------------------------------------------------
   // REFS FOR SOCKET, PEER, AUDIO ANALYZERS & MEDIA ELEMENTS
@@ -1541,6 +1543,10 @@ export default function App() {
     });
   };
 
+  const toggleTheaterMode = () => {
+    setIsTheaterMode(prev => !prev);
+  };
+
   const toggleFullscreen = () => {
     if (!mainPlayerContainerRef.current) return;
     if (!document.fullscreenElement) {
@@ -1551,6 +1557,23 @@ export default function App() {
       setIsFullscreen(false);
     }
   };
+
+  // Keyboard shortcut listener for cinema controls (T for theater, Esc to exit)
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      const tag = document.activeElement?.tagName?.toLowerCase();
+      if (tag === 'input' || tag === 'textarea') return;
+
+      if (e.key === 't' || e.key === 'T') {
+        setIsTheaterMode(prev => !prev);
+      }
+      if (e.key === 'Escape' && isTheaterMode) {
+        setIsTheaterMode(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isTheaterMode]);
 
   // ---------------------------------------------------------------------------
   // VIEW RENDER: 1. AUTHENTICATION & INSTANT GUEST ENTRY
@@ -1960,7 +1983,11 @@ export default function App() {
   return (
     <div className="h-screen w-screen bg-[#0b0f19] flex flex-col overflow-hidden text-slate-100 font-sans">
       {/* Top Application Bar */}
-      <header className="h-14 bg-slate-900/90 border-b border-slate-800 px-4 flex items-center justify-between flex-shrink-0 z-20">
+      <header
+        className={`h-14 bg-slate-900/90 border-b border-slate-800 px-4 flex items-center justify-between flex-shrink-0 z-20 transition-all duration-300 ${
+          isTheaterMode ? '-mt-14 opacity-0 pointer-events-none' : 'mt-0 opacity-100'
+        }`}
+      >
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-2">
             <div className="p-1.5 rounded-lg bg-brand-600">
@@ -2037,6 +2064,23 @@ export default function App() {
         </div>
       </header>
 
+      {/* Theater Mode Top Control Pill */}
+      {isTheaterMode && (
+        <div className="absolute top-3 left-1/2 -translate-x-1/2 z-40 flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-900/90 border border-slate-700/80 backdrop-blur-md shadow-2xl text-xs text-slate-300 animate-fade-in">
+          <span className="flex items-center gap-1.5 font-medium text-brand-300">
+            <Tv className="w-3.5 h-3.5 text-brand-400" />
+            Cinema Mode (T)
+          </span>
+          <div className="w-px h-3 bg-slate-700" />
+          <button
+            onClick={() => setIsTheaterMode(false)}
+            className="text-[11px] font-semibold text-slate-400 hover:text-white transition px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 cursor-pointer"
+          >
+            Exit (Esc)
+          </button>
+        </div>
+      )}
+
       {/* HOST NOTIFICATION: FLOATING ADMISSION REQUESTS BANNER */}
       {roomState.isHost && hostJoinRequests.length > 0 && (
         <div className="fixed top-16 right-4 z-50 w-80 sm:w-96 space-y-2 animate-fade-in shadow-2xl">
@@ -2092,7 +2136,11 @@ export default function App() {
         <section
           ref={mainPlayerContainerRef}
           className={`flex-1 flex flex-col bg-black relative justify-between p-4 overflow-hidden transition-all duration-300 ${
-            isChatOpen ? 'w-[70%] sm:w-[72%] md:w-[74%]' : 'w-full'
+            isTheaterMode
+              ? 'w-full'
+              : isChatOpen
+                ? 'w-[70%] sm:w-[72%] md:w-[74%]'
+                : 'w-full'
           }`}
         >
           {/* Main Video Stream Container (16:9 Aspect Ratio & Letterboxing) */}
@@ -2196,7 +2244,7 @@ export default function App() {
               </div>
             )}
 
-            {/* Top Right Controls Overlay (Aspect Ratio + Fullscreen) */}
+            {/* Top Right Controls Overlay (Aspect Ratio + Theater + Fullscreen) */}
             <div className="absolute top-4 right-4 flex items-center gap-2 z-10">
               {isScreenSharing && (
                 <button
@@ -2210,6 +2258,18 @@ export default function App() {
                   </span>
                 </button>
               )}
+              <button
+                onClick={toggleTheaterMode}
+                title={isTheaterMode ? 'Exit Cinema Mode (T)' : 'Cinema / Theater Mode (T)'}
+                className={`p-2 rounded-lg border backdrop-blur-sm transition z-10 cursor-pointer shadow-md flex items-center gap-1.5 text-xs font-semibold ${
+                  isTheaterMode
+                    ? 'bg-brand-600/90 hover:bg-brand-500 text-white border-brand-400'
+                    : 'bg-slate-900/80 hover:bg-slate-800 text-slate-300 hover:text-white border-slate-700/60'
+                }`}
+              >
+                <Tv className="w-4 h-4" />
+                <span className="hidden sm:inline text-[11px] font-mono">{isTheaterMode ? 'Exit Cinema' : 'Cinema'}</span>
+              </button>
               <button
                 onClick={toggleFullscreen}
                 title={isFullscreen ? 'Exit Fullscreen' : 'Enter Fullscreen'}
@@ -2565,10 +2625,16 @@ export default function App() {
         </section>
 
         {/* =================================================================== */}
-        {/* RIGHT PANEL: INTERACTIVE SIDEBAR (25% to 30% width) */}
+        {/* RIGHT PANEL: INTERACTIVE SIDEBAR */}
         {/* =================================================================== */}
         {isChatOpen && (
-          <aside className="w-[30%] sm:w-[28%] md:w-[26%] min-w-[280px] max-w-[380px] bg-slate-900 border-l border-slate-800 flex flex-col flex-shrink-0 z-10 overflow-hidden">
+          <aside
+            className={`flex flex-col flex-shrink-0 overflow-hidden transition-all duration-300 ${
+              isTheaterMode
+                ? 'absolute top-4 bottom-4 right-4 w-[340px] max-w-[90vw] bg-slate-900/95 backdrop-blur-xl border border-slate-700/80 shadow-2xl rounded-2xl z-30'
+                : 'w-[30%] sm:w-[28%] md:w-[26%] min-w-[280px] max-w-[380px] bg-slate-900 border-l border-slate-800 z-10'
+            }`}
+          >
             {/* ------------------------------------------------------------- */}
             {/* TOP SECTION: 2x3 WEBCAM MESH GRID (UP TO 6 PARTICIPANTS) */}
             {/* ------------------------------------------------------------- */}
@@ -2586,6 +2652,15 @@ export default function App() {
                     >
                       <PinOff className="w-3 h-3" />
                       <span>Unpin</span>
+                    </button>
+                  )}
+                  {isTheaterMode && (
+                    <button
+                      onClick={() => setIsChatOpen(false)}
+                      title="Hide Sidebar in Cinema Mode"
+                      className="text-[10px] text-slate-400 hover:text-white px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 cursor-pointer"
+                    >
+                      Hide
                     </button>
                   )}
                   <span className="text-[10px] text-emerald-400 font-mono flex items-center gap-1">
