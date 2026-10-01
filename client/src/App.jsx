@@ -39,7 +39,10 @@ import {
   Smile,
   AlertCircle,
   Pin,
-  PinOff
+  PinOff,
+  Settings,
+  ChevronDown,
+  Headphones
 } from 'lucide-react';
 
 // Backend server URL - adjust if running in production
@@ -97,6 +100,17 @@ export default function App() {
   const [screenAudioAlert, setScreenAudioAlert] = useState(false);
   const [activeSpeakers, setActiveSpeakers] = useState(new Set());
   const [remoteStreams, setRemoteStreams] = useState({}); // { [peerId]: MediaStream }
+
+  // ---------------------------------------------------------------------------
+  // HARDWARE MEDIA DEVICES (MIC, CAMERA, SPEAKER SWITCHING)
+  // ---------------------------------------------------------------------------
+  const [audioInputs, setAudioInputs] = useState([]);
+  const [videoInputs, setVideoInputs] = useState([]);
+  const [audioOutputs, setAudioOutputs] = useState([]);
+  const [selectedAudioInput, setSelectedAudioInput] = useState('');
+  const [selectedVideoInput, setSelectedVideoInput] = useState('');
+  const [selectedAudioOutput, setSelectedAudioOutput] = useState('');
+  const [deviceDropdownOpen, setDeviceDropdownOpen] = useState(null); // 'mic' | 'camera' | 'speaker' | 'all' | null
 
   // ---------------------------------------------------------------------------
   // CHAT & UI & PINNING STATE
@@ -282,6 +296,156 @@ export default function App() {
         console.warn('Audio also denied:', audioErr);
         return null;
       }
+    }
+  };
+
+  // Load and refresh available hardware devices (Mics, Cameras, Speakers)
+  const loadMediaDevices = useCallback(async () => {
+    if (!navigator.mediaDevices?.enumerateDevices) return;
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const aInputs = devices.filter(d => d.kind === 'audioinput');
+      const vInputs = devices.filter(d => d.kind === 'videoinput');
+      const aOutputs = devices.filter(d => d.kind === 'audiooutput');
+
+      setAudioInputs(aInputs);
+      setVideoInputs(vInputs);
+      setAudioOutputs(aOutputs);
+
+      // Auto-select current active device if not yet set
+      setSelectedAudioInput(prev => prev || (aInputs[0]?.deviceId || ''));
+      setSelectedVideoInput(prev => prev || (vInputs[0]?.deviceId || ''));
+      setSelectedAudioOutput(prev => prev || (aOutputs[0]?.deviceId || ''));
+    } catch (err) {
+      console.warn('Could not enumerate media devices:', err);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadMediaDevices();
+    if (navigator.mediaDevices?.addEventListener) {
+      navigator.mediaDevices.addEventListener('devicechange', loadMediaDevices);
+      return () => {
+        navigator.mediaDevices.removeEventListener('devicechange', loadMediaDevices);
+      };
+    }
+  }, [loadMediaDevices]);
+
+  // Switch Microphone hardware
+  const switchAudioInput = async (deviceId) => {
+    setSelectedAudioInput(deviceId);
+    try {
+      const newStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          ...DISCORD_AUDIO_CONSTRAINTS,
+          deviceId: deviceId ? { exact: deviceId } : undefined
+        }
+      });
+      const newTrack = newStream.getAudioTracks()[0];
+      if (!newTrack) return;
+
+      const currentStream = localStreamRef.current;
+      if (currentStream) {
+        const oldTrack = currentStream.getAudioTracks()[0];
+        if (oldTrack) {
+          oldTrack.stop();
+          currentStream.removeTrack(oldTrack);
+        }
+        currentStream.addTrack(newTrack);
+        newTrack.enabled = !isMicMuted;
+      }
+
+      // Replace audio track in all active webcam peer connections (ignore screen share)
+      Object.entries(peerConnectionsRef.current).forEach(([key, call]) => {
+        if (key.startsWith('screen-') || call.metadata?.type === 'screen-share') return;
+        try {
+          const senders = call.peerConnection?.getSenders() || [];
+          const audioSender = senders.find(s => s.track?.kind === 'audio');
+          if (audioSender) {
+            audioSender.replaceTrack(newTrack);
+          }
+        } catch (e) {
+          console.warn('Error replacing audio track on mic switch:', e);
+        }
+      });
+
+      if (currentStream) {
+        setupAudioAnalysis(currentStream, 'local');
+      }
+    } catch (err) {
+      console.error('Failed to switch microphone:', err);
+    }
+  };
+
+  // Switch Camera hardware
+  const switchVideoInput = async (deviceId) => {
+    setSelectedVideoInput(deviceId);
+    try {
+      const newStream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          width: { ideal: 640 },
+          height: { ideal: 480 },
+          frameRate: { ideal: 30 },
+          deviceId: deviceId ? { exact: deviceId } : undefined
+        }
+      });
+      const newTrack = newStream.getVideoTracks()[0];
+      if (!newTrack) return;
+
+      const currentStream = localStreamRef.current;
+      if (currentStream) {
+        const oldTrack = currentStream.getVideoTracks()[0];
+        if (oldTrack) {
+          oldTrack.stop();
+          currentStream.removeTrack(oldTrack);
+        }
+        currentStream.addTrack(newTrack);
+        newTrack.enabled = !isCameraOff;
+      }
+
+      if (localVideoRef.current && currentStream) {
+        localVideoRef.current.srcObject = currentStream;
+      }
+
+      // Replace video track in all active webcam peer connections (ignore screen share)
+      Object.entries(peerConnectionsRef.current).forEach(([key, call]) => {
+        if (key.startsWith('screen-') || call.metadata?.type === 'screen-share') return;
+        try {
+          const senders = call.peerConnection?.getSenders() || [];
+          const videoSender = senders.find(s => s.track?.kind === 'video');
+          if (videoSender) {
+            videoSender.replaceTrack(newTrack);
+          }
+        } catch (e) {
+          console.warn('Error replacing video track on camera switch:', e);
+        }
+      });
+    } catch (err) {
+      console.error('Failed to switch camera:', err);
+    }
+  };
+
+  // Switch Speaker / Headphones hardware
+  const switchAudioOutput = async (deviceId) => {
+    setSelectedAudioOutput(deviceId);
+    if (!('setSinkId' in HTMLMediaElement.prototype)) {
+      console.warn('Browser does not support setSinkId');
+      return;
+    }
+    try {
+      if (remoteScreenAudioRef.current && 'setSinkId' in remoteScreenAudioRef.current) {
+        await remoteScreenAudioRef.current.setSinkId(deviceId);
+      }
+      const participantAudios = document.querySelectorAll('audio[data-participant-audio]');
+      participantAudios.forEach(async el => {
+        try {
+          if ('setSinkId' in el) await el.setSinkId(deviceId);
+        } catch (e) {
+          console.warn('Error setting sinkId on participant audio:', e);
+        }
+      });
+    } catch (err) {
+      console.warn('Failed to switch speaker output:', err);
     }
   };
 
@@ -584,6 +748,12 @@ export default function App() {
             setRemoteStreams(prev => ({ ...prev, [call.peer]: userMediaStream }));
             setupAudioAnalysis(userMediaStream, call.peer);
           });
+          call.peerConnection?.addEventListener('track', (evt) => {
+            if (evt.streams && evt.streams[0]) {
+              console.log('[WebRTC Mesh ontrack event]', call.peer, evt.track.kind);
+              setRemoteStreams(prev => ({ ...prev, [call.peer]: evt.streams[0] }));
+            }
+          });
           peerConnectionsRef.current[call.peer] = call;
         }
       });
@@ -852,6 +1022,13 @@ export default function App() {
         console.log('[WebRTC Mesh] Call stream established with:', remotePeerId);
         setRemoteStreams(prev => ({ ...prev, [remotePeerId]: userMediaStream }));
         setupAudioAnalysis(userMediaStream, remotePeerId);
+      });
+
+      call.peerConnection?.addEventListener('track', (evt) => {
+        if (evt.streams && evt.streams[0]) {
+          console.log('[WebRTC Mesh ontrack event]', remotePeerId, evt.track.kind);
+          setRemoteStreams(prev => ({ ...prev, [remotePeerId]: evt.streams[0] }));
+        }
       });
 
       call.on('close', () => {
@@ -1706,8 +1883,9 @@ export default function App() {
               )}
             </div>
 
-            {/* Media Audio/Video Toggles */}
-            <div className="flex items-center gap-2">
+
+            {/* Media Audio/Video Toggles with Device Switcher Dropdowns */}
+            <div className="flex items-center gap-1.5 relative">
               {/* Audience Independent Movie Volume Slider */}
               {!roomState.isHost && isScreenSharing && (
                 <div className="flex items-center gap-1.5 bg-slate-800/80 px-2.5 py-1.5 rounded-lg border border-slate-700/60 mr-1 shadow-sm">
@@ -1723,50 +1901,280 @@ export default function App() {
                     className="w-14 sm:w-20 h-1 accent-brand-500 bg-slate-700 rounded cursor-pointer"
                     title={`Movie Volume: ${Math.round(screenVolume * 100)}%`}
                   />
-                  <span className="text-[9px] text-slate-400 font-mono w-6 text-right">
-                    {Math.round(screenVolume * 100)}%
-                  </span>
                 </div>
               )}
 
-              {/* Mic Toggle */}
+              {/* 1. Microphone Split Button & Dropdown */}
+              <div className="relative flex items-center rounded-lg bg-slate-800 border border-slate-700/80 shadow-sm">
+                <button
+                  onClick={toggleMicrophone}
+                  title={isMicMuted ? 'Unmute Microphone' : 'Mute Microphone'}
+                  className={`p-2 sm:p-2.5 rounded-l-lg text-xs font-medium transition cursor-pointer ${
+                    isMicMuted
+                      ? 'bg-rose-500/20 text-rose-400 hover:bg-rose-500/30'
+                      : 'text-emerald-400 hover:bg-slate-700/60'
+                  }`}
+                >
+                  {isMicMuted ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+                </button>
+                <button
+                  onClick={() => setDeviceDropdownOpen(deviceDropdownOpen === 'mic' ? null : 'mic')}
+                  title="Select Microphone Input"
+                  className="px-1 py-2 sm:py-2.5 rounded-r-lg hover:bg-slate-700 text-slate-400 hover:text-white transition border-l border-slate-700/60 cursor-pointer"
+                >
+                  <ChevronDown className="w-3 h-3" />
+                </button>
+              </div>
+
+              {/* 2. Camera Split Button & Dropdown */}
+              <div className="relative flex items-center rounded-lg bg-slate-800 border border-slate-700/80 shadow-sm">
+                <button
+                  onClick={toggleCamera}
+                  title={isCameraOff ? 'Turn Camera On' : 'Turn Camera Off'}
+                  className={`p-2 sm:p-2.5 rounded-l-lg text-xs font-medium transition cursor-pointer ${
+                    isCameraOff
+                      ? 'bg-rose-500/20 text-rose-400 hover:bg-rose-500/30'
+                      : 'text-blue-400 hover:bg-slate-700/60'
+                  }`}
+                >
+                  {isCameraOff ? <VideoOff className="w-4 h-4" /> : <Video className="w-4 h-4" />}
+                </button>
+                <button
+                  onClick={() => setDeviceDropdownOpen(deviceDropdownOpen === 'camera' ? null : 'camera')}
+                  title="Select Camera Input"
+                  className="px-1 py-2 sm:py-2.5 rounded-r-lg hover:bg-slate-700 text-slate-400 hover:text-white transition border-l border-slate-700/60 cursor-pointer"
+                >
+                  <ChevronDown className="w-3 h-3" />
+                </button>
+              </div>
+
+              {/* 3. Speaker / Output Split Button & Dropdown */}
+              <div className="relative flex items-center rounded-lg bg-slate-800 border border-slate-700/80 shadow-sm">
+                <button
+                  onClick={toggleSpeaker}
+                  title={isSpeakerMuted ? 'Unmute Party Audio' : 'Mute Party Audio'}
+                  className={`p-2 sm:p-2.5 rounded-l-lg text-xs font-medium transition cursor-pointer ${
+                    isSpeakerMuted
+                      ? 'bg-rose-500/20 text-rose-400 hover:bg-rose-500/30'
+                      : 'text-slate-200 hover:bg-slate-700/60'
+                  }`}
+                >
+                  {isSpeakerMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+                </button>
+                <button
+                  onClick={() => setDeviceDropdownOpen(deviceDropdownOpen === 'speaker' ? null : 'speaker')}
+                  title="Select Speaker / Headphones Output"
+                  className="px-1 py-2 sm:py-2.5 rounded-r-lg hover:bg-slate-700 text-slate-400 hover:text-white transition border-l border-slate-700/60 cursor-pointer"
+                >
+                  <ChevronDown className="w-3 h-3" />
+                </button>
+              </div>
+
+              {/* 4. Full Device Settings Quick Modal Button */}
               <button
-                onClick={toggleMicrophone}
-                title={isMicMuted ? 'Unmute Microphone' : 'Mute Microphone'}
-                className={`p-2.5 rounded-lg text-xs font-medium transition cursor-pointer ${
-                  isMicMuted
-                    ? 'bg-rose-500/20 text-rose-400 border border-rose-500/40'
-                    : 'bg-slate-800 hover:bg-slate-700 text-emerald-400 border border-slate-700'
+                onClick={() => setDeviceDropdownOpen(deviceDropdownOpen === 'all' ? null : 'all')}
+                title="Hardware Device Settings"
+                className={`p-2 sm:p-2.5 rounded-lg text-xs border transition cursor-pointer ${
+                  deviceDropdownOpen === 'all'
+                    ? 'bg-brand-500/20 text-brand-300 border-brand-500/40'
+                    : 'bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white border-slate-700'
                 }`}
               >
-                {isMicMuted ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+                <Settings className="w-4 h-4" />
               </button>
 
-              {/* Camera Toggle */}
-              <button
-                onClick={toggleCamera}
-                title={isCameraOff ? 'Turn Camera On' : 'Turn Camera Off'}
-                className={`p-2.5 rounded-lg text-xs font-medium transition cursor-pointer ${
-                  isCameraOff
-                    ? 'bg-rose-500/20 text-rose-400 border border-rose-500/40'
-                    : 'bg-slate-800 hover:bg-slate-700 text-blue-400 border border-slate-700'
-                }`}
-              >
-                {isCameraOff ? <VideoOff className="w-4 h-4" /> : <Video className="w-4 h-4" />}
-              </button>
+              {/* Backdrop Click to close dropdowns */}
+              {deviceDropdownOpen && (
+                <div
+                  className="fixed inset-0 z-40"
+                  onClick={() => setDeviceDropdownOpen(null)}
+                />
+              )}
 
-              {/* Speaker Toggle */}
-              <button
-                onClick={toggleSpeaker}
-                title={isSpeakerMuted ? 'Unmute Party Audio' : 'Mute Party Audio'}
-                className={`p-2.5 rounded-lg text-xs font-medium transition cursor-pointer ${
-                  isSpeakerMuted
-                    ? 'bg-rose-500/20 text-rose-400 border border-rose-500/40'
-                    : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700'
-                }`}
-              >
-                {isSpeakerMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
-              </button>
+              {/* FLOATING DROPDOWN: MICROPHONE */}
+              {deviceDropdownOpen === 'mic' && (
+                <div className="absolute bottom-16 left-0 sm:left-auto right-auto z-50 w-72 rounded-xl bg-slate-900 border border-slate-700 shadow-2xl p-3 text-xs backdrop-blur-md animate-fade-in">
+                  <div className="flex items-center justify-between pb-2 mb-2 border-b border-slate-800">
+                    <span className="font-semibold text-slate-200 flex items-center gap-1.5">
+                      <Mic className="w-3.5 h-3.5 text-emerald-400" />
+                      Select Microphone
+                    </span>
+                    <span className="text-[10px] text-slate-400 font-mono">{audioInputs.length} detected</span>
+                  </div>
+                  <div className="space-y-1 max-h-48 overflow-y-auto">
+                    {audioInputs.length === 0 ? (
+                      <div className="text-[11px] text-slate-500 py-2 text-center">No microphones detected</div>
+                    ) : (
+                      audioInputs.map(dev => (
+                        <button
+                          key={dev.deviceId || dev.label}
+                          onClick={() => {
+                            switchAudioInput(dev.deviceId);
+                            setDeviceDropdownOpen(null);
+                          }}
+                          className={`w-full text-left px-2.5 py-2 rounded-lg text-[11px] transition flex items-center justify-between cursor-pointer ${
+                            selectedAudioInput === dev.deviceId
+                              ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-medium'
+                              : 'hover:bg-slate-800 text-slate-300'
+                          }`}
+                        >
+                          <span className="truncate pr-2">{dev.label || `Microphone ${dev.deviceId.slice(0, 5)}`}</span>
+                          {selectedAudioInput === dev.deviceId && <Check className="w-3.5 h-3.5 text-emerald-400 flex-shrink-0" />}
+                        </button>
+                      ))
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* FLOATING DROPDOWN: CAMERA */}
+              {deviceDropdownOpen === 'camera' && (
+                <div className="absolute bottom-16 left-0 sm:left-auto right-auto z-50 w-72 rounded-xl bg-slate-900 border border-slate-700 shadow-2xl p-3 text-xs backdrop-blur-md animate-fade-in">
+                  <div className="flex items-center justify-between pb-2 mb-2 border-b border-slate-800">
+                    <span className="font-semibold text-slate-200 flex items-center gap-1.5">
+                      <Video className="w-3.5 h-3.5 text-blue-400" />
+                      Select Camera
+                    </span>
+                    <span className="text-[10px] text-slate-400 font-mono">{videoInputs.length} detected</span>
+                  </div>
+                  <div className="space-y-1 max-h-48 overflow-y-auto">
+                    {videoInputs.length === 0 ? (
+                      <div className="text-[11px] text-slate-500 py-2 text-center">No cameras detected</div>
+                    ) : (
+                      videoInputs.map(dev => (
+                        <button
+                          key={dev.deviceId || dev.label}
+                          onClick={() => {
+                            switchVideoInput(dev.deviceId);
+                            setDeviceDropdownOpen(null);
+                          }}
+                          className={`w-full text-left px-2.5 py-2 rounded-lg text-[11px] transition flex items-center justify-between cursor-pointer ${
+                            selectedVideoInput === dev.deviceId
+                              ? 'bg-blue-500/20 text-blue-300 border border-blue-500/30 font-medium'
+                              : 'hover:bg-slate-800 text-slate-300'
+                          }`}
+                        >
+                          <span className="truncate pr-2">{dev.label || `Camera ${dev.deviceId.slice(0, 5)}`}</span>
+                          {selectedVideoInput === dev.deviceId && <Check className="w-3.5 h-3.5 text-blue-400 flex-shrink-0" />}
+                        </button>
+                      ))
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* FLOATING DROPDOWN: SPEAKER / OUTPUT */}
+              {deviceDropdownOpen === 'speaker' && (
+                <div className="absolute bottom-16 right-0 z-50 w-72 rounded-xl bg-slate-900 border border-slate-700 shadow-2xl p-3 text-xs backdrop-blur-md animate-fade-in">
+                  <div className="flex items-center justify-between pb-2 mb-2 border-b border-slate-800">
+                    <span className="font-semibold text-slate-200 flex items-center gap-1.5">
+                      <Headphones className="w-3.5 h-3.5 text-brand-400" />
+                      Select Speaker / Headphones
+                    </span>
+                    <span className="text-[10px] text-slate-400 font-mono">{audioOutputs.length} detected</span>
+                  </div>
+                  <div className="space-y-1 max-h-48 overflow-y-auto">
+                    {audioOutputs.length === 0 ? (
+                      <div className="text-[11px] text-slate-500 py-2 text-center">Default System Output</div>
+                    ) : (
+                      audioOutputs.map(dev => (
+                        <button
+                          key={dev.deviceId || dev.label}
+                          onClick={() => {
+                            switchAudioOutput(dev.deviceId);
+                            setDeviceDropdownOpen(null);
+                          }}
+                          className={`w-full text-left px-2.5 py-2 rounded-lg text-[11px] transition flex items-center justify-between cursor-pointer ${
+                            selectedAudioOutput === dev.deviceId
+                              ? 'bg-brand-500/20 text-brand-300 border border-brand-500/30 font-medium'
+                              : 'hover:bg-slate-800 text-slate-300'
+                          }`}
+                        >
+                          <span className="truncate pr-2">{dev.label || `Speaker ${dev.deviceId.slice(0, 5)}`}</span>
+                          {selectedAudioOutput === dev.deviceId && <Check className="w-3.5 h-3.5 text-brand-400 flex-shrink-0" />}
+                        </button>
+                      ))
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* FULL HARDWARE SETTINGS MODAL / POPOVER */}
+              {deviceDropdownOpen === 'all' && (
+                <div className="absolute bottom-16 right-0 z-50 w-80 sm:w-96 rounded-2xl bg-slate-900/95 border border-slate-700/80 shadow-2xl p-4 text-xs backdrop-blur-lg animate-fade-in">
+                  <div className="flex items-center justify-between pb-3 mb-3 border-b border-slate-800">
+                    <span className="font-bold text-sm text-white flex items-center gap-2">
+                      <Settings className="w-4 h-4 text-brand-400" />
+                      Audio & Video Devices
+                    </span>
+                    <button
+                      onClick={() => setDeviceDropdownOpen(null)}
+                      className="p-1 rounded-md hover:bg-slate-800 text-slate-400 hover:text-white cursor-pointer"
+                    >
+                      ✕
+                    </button>
+                  </div>
+
+                  <div className="space-y-3.5">
+                    {/* Microphone Select */}
+                    <div>
+                      <label className="text-[11px] font-semibold text-slate-300 mb-1 flex items-center gap-1.5">
+                        <Mic className="w-3 h-3 text-emerald-400" />
+                        Microphone (Audio Input)
+                      </label>
+                      <select
+                        value={selectedAudioInput}
+                        onChange={(e) => switchAudioInput(e.target.value)}
+                        className="w-full px-2.5 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-white text-xs focus:ring-1 focus:ring-brand-500 outline-none"
+                      >
+                        {audioInputs.map(dev => (
+                          <option key={dev.deviceId} value={dev.deviceId}>
+                            {dev.label || `Microphone ${dev.deviceId.slice(0, 5)}`}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {/* Camera Select */}
+                    <div>
+                      <label className="text-[11px] font-semibold text-slate-300 mb-1 flex items-center gap-1.5">
+                        <Video className="w-3 h-3 text-blue-400" />
+                        Camera (Video Input)
+                      </label>
+                      <select
+                        value={selectedVideoInput}
+                        onChange={(e) => switchVideoInput(e.target.value)}
+                        className="w-full px-2.5 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-white text-xs focus:ring-1 focus:ring-brand-500 outline-none"
+                      >
+                        {videoInputs.map(dev => (
+                          <option key={dev.deviceId} value={dev.deviceId}>
+                            {dev.label || `Camera ${dev.deviceId.slice(0, 5)}`}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {/* Speaker Select */}
+                    <div>
+                      <label className="text-[11px] font-semibold text-slate-300 mb-1 flex items-center gap-1.5">
+                        <Headphones className="w-3 h-3 text-brand-400" />
+                        Speaker / Headphones (Audio Output)
+                      </label>
+                      <select
+                        value={selectedAudioOutput}
+                        onChange={(e) => switchAudioOutput(e.target.value)}
+                        className="w-full px-2.5 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-white text-xs focus:ring-1 focus:ring-brand-500 outline-none"
+                      >
+                        {audioOutputs.map(dev => (
+                          <option key={dev.deviceId} value={dev.deviceId}>
+                            {dev.label || `Speaker ${dev.deviceId.slice(0, 5)}`}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Sidebar toggle */}
@@ -2213,9 +2621,13 @@ export default function App() {
         {Object.entries(remoteStreams).map(([peerId, stream]) => (
           <audio
             key={`remote-audio-${peerId}`}
+            data-participant-audio="true"
             ref={el => {
               if (el && el.srcObject !== stream) {
                 el.srcObject = stream;
+                if (selectedAudioOutput && 'setSinkId' in el) {
+                  el.setSinkId(selectedAudioOutput).catch(e => console.warn('setSinkId error:', e));
+                }
                 el.play().catch(e => console.warn('Remote mic audio play error:', e));
               }
             }}
@@ -2242,19 +2654,33 @@ export default function App() {
 /**
  * Subcomponent to safely attach participant media stream to video element
  */
-function ParticipantVideo({ stream, isSpeakerMuted, className = "w-full h-full object-cover transform -scale-x-100" }) {
+function ParticipantVideo({ stream, isSpeakerMuted, className = "w-full h-full object-cover" }) {
   const videoRef = useRef(null);
 
   useEffect(() => {
-    if (videoRef.current && stream) {
-      videoRef.current.srcObject = stream;
-      const playPromise = videoRef.current.play();
-      if (playPromise !== undefined) {
-        playPromise.catch(err => {
-          console.warn('Autoplay prevented on participant video:', err);
-        });
-      }
-    }
+    const videoEl = videoRef.current;
+    if (!videoEl || !stream) return;
+
+    videoEl.srcObject = stream;
+    const playVideo = () => {
+      videoEl.play().catch(err => {
+        console.warn('Autoplay notice on participant video:', err);
+      });
+    };
+
+    playVideo();
+
+    stream.addEventListener('addtrack', playVideo);
+    stream.getVideoTracks().forEach(track => {
+      track.addEventListener('unmute', playVideo);
+    });
+
+    return () => {
+      stream.removeEventListener('addtrack', playVideo);
+      stream.getVideoTracks().forEach(track => {
+        track.removeEventListener('unmute', playVideo);
+      });
+    };
   }, [stream]);
 
   return (
